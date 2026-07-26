@@ -38,6 +38,7 @@ function documentedServerVariables(markdown: string): Set<string> {
   // `#`-prefixed line inside a fenced code block (e.g. a shell comment) is
   // not a heading at all, so track fence state and ignore it.
   let isInFence = false;
+  let isEnded = false;
   const body = lines.slice(start + 1);
   for (const line of body) {
     if (line.startsWith("```")) {
@@ -51,6 +52,7 @@ function documentedServerVariables(markdown: string): Set<string> {
       continue;
     }
     if (/^#{1,3} /.test(line)) {
+      isEnded = true;
       break;
     }
     // First table cell of a data row: | `VARIABLE_NAME` | ... |
@@ -58,6 +60,21 @@ function documentedServerVariables(markdown: string): Set<string> {
     if (name !== undefined) {
       documented.add(name);
     }
+  }
+  // An unbalanced fence would silently swallow the rest of the section
+  // (and the heading that ends it), under-reporting the documented vars
+  // as a confusing "undocumented var" diff. Name the real cause instead.
+  if (isInFence) {
+    throw new Error(
+      "README 'haru-server environment' section has an unterminated code fence",
+    );
+  }
+  // Reaching EOF is fine only if the section really is last; today it is
+  // not, so a missing terminator means the walk overran.
+  if (!isEnded && documented.size === 0) {
+    throw new Error(
+      "README 'haru-server environment' section documented no variables",
+    );
   }
   return documented;
 }
@@ -100,6 +117,34 @@ describe("haru-server environment docs", () => {
       "PORT",
       "HARU_API_TOKEN",
     ]);
+  });
+
+  it("ends the section at a higher-level heading too", () => {
+    // `## ` and `# ` terminate the section just like `### `; only `####`
+    // (deeper) stays inside it.
+    const markdown = [
+      "### haru-server environment",
+      "| `DATABASE_URL` | conn |",
+      "## Some parent section",
+      "| `AFTER_SECTION` | ignored |",
+    ].join("\n");
+    expect([...documentedServerVariables(markdown)]).toEqual(["DATABASE_URL"]);
+  });
+
+  it("names an unterminated code fence instead of under-reporting", () => {
+    // An odd number of fences would otherwise swallow the rest of the
+    // section AND its terminating heading, surfacing as a baffling
+    // "undocumented env var" diff rather than the markdown typo it is.
+    const markdown = [
+      "### haru-server environment",
+      "| `DATABASE_URL` | conn |",
+      "```sh",
+      "echo unterminated",
+      "### Consumer contract",
+    ].join("\n");
+    expect(() => documentedServerVariables(markdown)).toThrow(
+      /unterminated code fence/,
+    );
   });
 
   it("throws when the section heading is absent", () => {
