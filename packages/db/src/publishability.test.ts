@@ -59,7 +59,13 @@ function parseDenylist(text: string): readonly DenylistRule[] {
     if (source === "") {
       throw new Error(`${where} has an empty pattern`);
     }
-    rules.push({ label: line.slice(0, tab), pattern: new RegExp(source, "i") });
+    const label = line.slice(0, tab).trim();
+    // An empty label would make the per-rule coverage check below match
+    // anything, so a dead pattern could still look covered.
+    if (label === "") {
+      throw new Error(`${where} has an empty label`);
+    }
+    rules.push({ label, pattern: new RegExp(source, "i") });
   }
   if (rules.length === 0) {
     throw new Error("publishability denylist parsed to zero rules");
@@ -144,19 +150,32 @@ function governedFiles(): string[] {
   ];
 }
 
+interface Violation {
+  readonly file: string;
+  readonly line: number;
+  readonly label: string;
+  readonly match: string;
+}
+
+function formatViolation({ file, line, label, match }: Violation): string {
+  return `${file}:${String(line)} ${label}: "${match}"`;
+}
+
 /**
  * Pure matcher (relative path + content in, violations out), so the
  * per-token coverage test below can exercise the real detection logic
- * without writing fixture files to disk.
+ * without writing fixture files to disk. Returns STRUCTURED violations:
+ * the coverage check compares labels exactly, which a formatted string
+ * could not (a substring or empty label would match anything).
  */
-function violationsInText(relative: string, content: string): string[] {
+function violationsInText(relative: string, content: string): Violation[] {
   // Fast path: almost every file matches nothing, so test the whole file
   // once and only walk lines (to name the offending line) on a real hit.
   // Patterns carry no `g` flag, so `.test` and `.exec` share no lastIndex.
   if (DENYLIST.every(({ pattern }) => !pattern.test(content))) {
     return [];
   }
-  const found: string[] = [];
+  const found: Violation[] = [];
   for (const [index, line] of content.split("\n").entries()) {
     // Escape hatch: a line with a legitimate token that collides with a
     // denylist word opts out with a `publishability-allow` marker. None
@@ -167,14 +186,19 @@ function violationsInText(relative: string, content: string): string[] {
     for (const { label, pattern } of DENYLIST) {
       const match = pattern.exec(line);
       if (match) {
-        found.push(`${relative}:${String(index + 1)} ${label}: "${match[0]}"`);
+        found.push({
+          file: relative,
+          line: index + 1,
+          label,
+          match: match[0],
+        });
       }
     }
   }
   return found;
 }
 
-function violationsInFile(file: string): string[] {
+function violationsInFile(file: string): Violation[] {
   return violationsInText(
     file.slice(REPO_ROOT.length),
     readFileSync(file, "utf8"),
@@ -198,7 +222,10 @@ describe("publishability", () => {
     const violations = governedFiles().flatMap((file) =>
       violationsInFile(file),
     );
-    expect(violations, violations.join("\n")).toEqual([]);
+    const report = violations
+      .map((violation) => formatViolation(violation))
+      .join("\n");
+    expect(violations, report).toEqual([]);
   });
 
   it("scans the governed roots and its matcher is non-vacuous (positive control)", () => {
@@ -234,9 +261,13 @@ describe("publishability", () => {
     // not the raw regexes, is what fails if the scanner itself regresses.
     const detected = violationsInFile(DENYLIST_PATH);
     expect(detected.length).toBeGreaterThan(0);
+    const reported = new Set(detected.map((violation) => violation.label));
     for (const { label } of DENYLIST) {
+      // Exact label equality, not a substring test: a label that is a
+      // substring of another rule's could otherwise ride on that rule's
+      // hits and look covered while its own pattern is dead.
       expect(
-        detected.some((violation) => violation.includes(label)),
+        reported.has(label),
         `${label} must be reported through the scan pipeline`,
       ).toBe(true);
     }
@@ -251,6 +282,12 @@ describe("publishability", () => {
     expect(() => parseDenylist("")).toThrow(/zero rules/);
     expect(() => parseDenylist("label with spaces not a tab\n")).toThrow(/TAB/);
     expect(() => parseDenylist("label\t\n")).toThrow(/empty pattern/);
+    // An empty label would make the per-rule coverage check vacuous
+    // (every violation string "contains" it), hiding a dead pattern.
+    expect(() => parseDenylist("\t\\bTEST-ACCEL\\b\n")).toThrow(/empty label/);
+    expect(() => parseDenylist("   \t\\bTEST-ACCEL\\b\n")).toThrow(
+      /empty label/,
+    );
     // A CRLF checkout must still yield a WORKING pattern, not one with a
     // trailing carriage return that can never match real source.
     const [rule] = parseDenylist("gpu\t\\bTEST-ACCEL\\b\r\n");
@@ -260,10 +297,17 @@ describe("publishability", () => {
   it("detects every sampled identifier (per-token coverage)", () => {
     // The rules are large alternations, so "the pattern matches the policy
     // text" stays true even when individual alternatives are deleted. Each
-    // sample pins ONE branch: drop `|\\bqwen\\b` and this fails, where the
-    // per-rule check above would not.
+    // sample pins ONE branch: delete a branch from a rule and its sample
+    // stops being detected here, where the per-rule check above would not
+    // notice. (No identifier is named in this comment on purpose - the two
+    // .txt data files are the only sanctioned home for them.)
     const samples = parseSamples(readFileSync(SAMPLES_PATH, "utf8"));
-    expect(samples.length).toBeGreaterThan(20);
+    // EXACT count, not a floor: a floor lets branches be deleted in pairs
+    // (the branch AND its sample) until it is reached, which is precisely
+    // the silent weakening the samples exist to prevent. Adding a branch
+    // means adding a sample and bumping this number, all in one visible
+    // diff.
+    expect(samples.length).toBe(41);
     const undetected = samples.filter(
       (sample) =>
         violationsInText("<sample>", `const value = "${sample}";`).length === 0,
