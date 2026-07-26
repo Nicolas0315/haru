@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { createDatabase } from "./client.js";
 import { applyFleetLayout } from "./repo/layout.js";
+import { formatSeedError } from "./seed-error.js";
 
 /**
  * Seed a fleet from a declarative layout file.
@@ -62,9 +63,6 @@ try {
   // A missing/invalid layout file (readFileSync/JSON.parse) or a schema
   // validation failure (applyFleetLayout) should exit like the
   // DATABASE_URL guard - a clean one-line message, not a raw stack trace.
-  // Collapse embedded newlines (multi-issue Zod / JSON.parse errors carry
-  // them) so the output stays a single line.
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`seed failed: ${message.replaceAll(/[\r\n]+/g, " ")}`);
+  console.error(formatSeedError(error));
   process.exit(1);
 }
