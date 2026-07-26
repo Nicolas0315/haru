@@ -212,7 +212,16 @@ Dependency graph (enforce it when adding imports):
 - This repository is written to be publishable: nothing in code, comments,
   tests, or docs may reference the private repositories or infrastructure of
   its consumers, and no specific model or GPU names belong in code, seeds, or
-  example layouts (workloads are pure data).
+  example layouts (workloads are pure data). A CI gate enforces the
+  model/GPU half (`publishability.test.ts` in @haru/db, scanning the
+  packages/services/.github trees plus the root-level files). Its ONE
+  sanctioned exception is the pair of governed DATA files it reads -
+  `publishability-denylist.txt` (the patterns) and
+  `publishability-samples.txt` (one identifier per rule branch, pinning
+  per-token coverage): they are data, not code/seeds/layouts, and are never
+  themselves scanned. Put no model or GPU name anywhere else, and add a
+  sample whenever you add a denylist branch. A line with a legitimate
+  colliding token opts out with a `publishability-allow` marker.
 
 ### Testing conventions
 

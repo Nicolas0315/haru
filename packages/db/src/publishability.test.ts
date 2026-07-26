@@ -69,8 +69,15 @@ function parseDenylist(text: string): readonly DenylistRule[] {
 
 const DENYLIST = parseDenylist(readFileSync(DENYLIST_PATH, "utf8"));
 
+const SAMPLES_PATH = fileURLToPath(
+  new URL("publishability-samples.txt", import.meta.url),
+);
+
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const SCAN_ROOTS = ["packages", "services"];
+// Governed trees, scanned recursively. Root-level files (README, AGENTS,
+// KNOWN_ISSUES, configs) are added separately, non-recursively, so the
+// walk never descends into the workspace root's node_modules or .git.
+const SCAN_ROOTS = ["packages", "services", ".github"];
 const SKIP_DIRECTORIES = new Set([
   "node_modules",
   "dist",
@@ -81,9 +88,24 @@ const SKIP_DIRECTORIES = new Set([
 // Every module extension the repo ships (nodenext ESM/CJS + the .mjs
 // generator scripts), so the gate governs ALL code, not only .ts.
 const SOURCE_EXTENSIONS = [".ts", ".mts", ".cts", ".mjs", ".cjs", ".js"];
+// Prose and workflow files: AGENTS.md scopes model/GPU names to code,
+// seeds and layouts, but the surrounding publishability rule also covers
+// comments and docs, so they are governed too.
+const DOCUMENT_EXTENSIONS = [".md", ".yaml", ".yml"];
 
+/**
+ * Which files the gate reads. Deliberate exclusions, asserted below:
+ * `package.json`/`tsconfig*.json` (build config, no workload data) and
+ * `.txt` (the governed home for the policy and its samples - scanning
+ * them would flag the policy by its own rules). Everything else with a
+ * governed extension is in scope.
+ */
 function isScannable(name: string): boolean {
-  if (SOURCE_EXTENSIONS.some((extension) => name.endsWith(extension))) {
+  if (
+    [...SOURCE_EXTENSIONS, ...DOCUMENT_EXTENSIONS].some((extension) =>
+      name.endsWith(extension),
+    )
+  ) {
     return true;
   }
   // Shipped data (layouts, seeds, generated schemas), but not the
@@ -111,15 +133,29 @@ function scannableFiles(directory: string): string[] {
   return found;
 }
 
-function violationsInFile(file: string): string[] {
-  const content = readFileSync(file, "utf8");
+/** Every governed file: the scan roots plus the root-level files. */
+function governedFiles(): string[] {
+  const rootLevel = readdirSync(REPO_ROOT, { withFileTypes: true })
+    .filter((entry) => !entry.isDirectory() && isScannable(entry.name))
+    .map((entry) => `${REPO_ROOT}${entry.name}`);
+  return [
+    ...SCAN_ROOTS.flatMap((root) => scannableFiles(`${REPO_ROOT}${root}`)),
+    ...rootLevel,
+  ];
+}
+
+/**
+ * Pure matcher (relative path + content in, violations out), so the
+ * per-token coverage test below can exercise the real detection logic
+ * without writing fixture files to disk.
+ */
+function violationsInText(relative: string, content: string): string[] {
   // Fast path: almost every file matches nothing, so test the whole file
   // once and only walk lines (to name the offending line) on a real hit.
   // Patterns carry no `g` flag, so `.test` and `.exec` share no lastIndex.
   if (DENYLIST.every(({ pattern }) => !pattern.test(content))) {
     return [];
   }
-  const relative = file.slice(REPO_ROOT.length);
   const found: string[] = [];
   for (const [index, line] of content.split("\n").entries()) {
     // Escape hatch: a line with a legitimate token that collides with a
@@ -138,12 +174,29 @@ function violationsInFile(file: string): string[] {
   return found;
 }
 
+function violationsInFile(file: string): string[] {
+  return violationsInText(
+    file.slice(REPO_ROOT.length),
+    readFileSync(file, "utf8"),
+  );
+}
+
+/** The identifiers the gate must detect, one per line (governed data). */
+function parseSamples(text: string): readonly string[] {
+  const samples = text
+    .split("\n")
+    .map((line) => line.replace(/\r$/, "").trim())
+    .filter((line) => line !== "" && !line.startsWith("#"));
+  if (samples.length === 0) {
+    throw new Error("publishability samples parsed to zero entries");
+  }
+  return samples;
+}
+
 describe("publishability", () => {
   it("carries no specific GPU or LLM model names in code or layouts", () => {
-    const violations = SCAN_ROOTS.flatMap((root) =>
-      scannableFiles(`${REPO_ROOT}${root}`).flatMap((file) =>
-        violationsInFile(file),
-      ),
+    const violations = governedFiles().flatMap((file) =>
+      violationsInFile(file),
     );
     expect(violations, violations.join("\n")).toEqual([]);
   });
@@ -152,17 +205,19 @@ describe("publishability", () => {
     // A green `toEqual([])` above must mean "no leaks", not "scanned
     // nothing" or "the matcher is vacuous". Prove coverage with explicit
     // sentinels - representative governed files that MUST be scanned,
-    // spanning both roots and every kind (.ts, .mjs, .json data) - so a
-    // REPO_ROOT / isScannable regression cannot silently scan nothing.
-    const scanned = new Set(
-      SCAN_ROOTS.flatMap((root) => scannableFiles(`${REPO_ROOT}${root}`)),
-    );
+    // spanning every root and kind (.ts, .mjs, .json data, root-level and
+    // .github prose) - so a REPO_ROOT / isScannable regression cannot
+    // silently scan nothing.
+    const scanned = new Set(governedFiles());
     for (const relative of [
       "packages/db/src/seed.ts",
       "packages/protocol/scripts/generate-schemas.mjs",
       "services/haru-server/src/environment.ts",
       "packages/db/examples/fleet.example.json",
       "packages/protocol/schemas/fleet-layout.schema.json",
+      "AGENTS.md",
+      "README.md",
+      ".github/workflows/ci.yaml",
     ]) {
       expect(
         scanned.has(`${REPO_ROOT}${relative}`),
@@ -200,5 +255,56 @@ describe("publishability", () => {
     // trailing carriage return that can never match real source.
     const [rule] = parseDenylist("gpu\t\\bTEST-ACCEL\\b\r\n");
     expect(rule?.pattern.test('const a = "TEST-ACCEL";')).toBe(true);
+  });
+
+  it("detects every sampled identifier (per-token coverage)", () => {
+    // The rules are large alternations, so "the pattern matches the policy
+    // text" stays true even when individual alternatives are deleted. Each
+    // sample pins ONE branch: drop `|\\bqwen\\b` and this fails, where the
+    // per-rule check above would not.
+    const samples = parseSamples(readFileSync(SAMPLES_PATH, "utf8"));
+    expect(samples.length).toBeGreaterThan(20);
+    const undetected = samples.filter(
+      (sample) =>
+        violationsInText("<sample>", `const value = "${sample}";`).length === 0,
+    );
+    expect(
+      undetected,
+      `samples the gate no longer detects: ${String(undetected)}`,
+    ).toEqual([]);
+    // The samples file is governed data, never itself scanned.
+    expect(new Set(governedFiles()).has(SAMPLES_PATH)).toBe(false);
+    expect(() => parseSamples("# nothing\n")).toThrow(/zero entries/);
+  });
+
+  it("covers the governed extensions and documents its exclusions", () => {
+    // The extension list is otherwise aspirational: only .ts and one .mjs
+    // exist today, so nothing would notice if .cjs/.mts fell out.
+    for (const name of [
+      "a.ts",
+      "a.mts",
+      "a.cts",
+      "a.mjs",
+      "a.cjs",
+      "a.js",
+      "a.md",
+      "a.yaml",
+      "a.yml",
+      "fleet.example.json",
+    ]) {
+      expect(isScannable(name), `${name} must be scanned`).toBe(true);
+    }
+    // Deliberate exclusions: build config carries no workload data, and
+    // .txt is the sanctioned home for the policy and its samples.
+    for (const name of [
+      "package.json",
+      "tsconfig.json",
+      "tsconfig.build.json",
+      "publishability-denylist.txt",
+      "publishability-samples.txt",
+      "pnpm-lock.yaml.license",
+    ]) {
+      expect(isScannable(name), `${name} must be excluded`).toBe(false);
+    }
   });
 });
