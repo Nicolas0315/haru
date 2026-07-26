@@ -25,19 +25,49 @@ const DENYLIST_PATH = fileURLToPath(
   new URL("publishability-denylist.txt", import.meta.url),
 );
 
-const DENYLIST: readonly {
+interface DenylistRule {
   readonly label: string;
   readonly pattern: RegExp;
-}[] = readFileSync(DENYLIST_PATH, "utf8")
-  .split("\n")
-  .filter((line) => line.trim() !== "" && !line.startsWith("#"))
-  .map((line) => {
+}
+
+/**
+ * Parse the policy text into rules. Pure (text in, rules out) so the
+ * malformed-input handling below is testable without filesystem I/O.
+ *
+ * Every failure mode here THROWS rather than dropping a rule: a policy
+ * file that silently parses to fewer (or zero) rules would leave the gate
+ * green while enforcing nothing, which is the one outcome a guardrail
+ * must never have. The `\r` strip matters for the same reason - on a CRLF
+ * checkout the carriage return would otherwise land inside every pattern
+ * and make each rule match nothing.
+ */
+function parseDenylist(text: string): readonly DenylistRule[] {
+  const rules: DenylistRule[] = [];
+  for (const [index, raw] of text.split("\n").entries()) {
+    const line = raw.replace(/\r$/, "");
+    if (line.trim() === "" || line.startsWith("#")) {
+      continue;
+    }
+    const where = `publishability denylist line ${String(index + 1)}`;
     const tab = line.indexOf("\t");
-    return {
-      label: line.slice(0, tab),
-      pattern: new RegExp(line.slice(tab + 1), "i"),
-    };
-  });
+    if (tab === -1) {
+      throw new Error(
+        `${where} has no TAB separator (expected ${String.raw`"label\tregex"`})`,
+      );
+    }
+    const source = line.slice(tab + 1);
+    if (source === "") {
+      throw new Error(`${where} has an empty pattern`);
+    }
+    rules.push({ label: line.slice(0, tab), pattern: new RegExp(source, "i") });
+  }
+  if (rules.length === 0) {
+    throw new Error("publishability denylist parsed to zero rules");
+  }
+  return rules;
+}
+
+const DENYLIST = parseDenylist(readFileSync(DENYLIST_PATH, "utf8"));
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
 const SCAN_ROOTS = ["packages", "services"];
@@ -140,15 +170,35 @@ describe("publishability", () => {
       ).toBe(true);
     }
     // The policy file itself is intentionally NOT scanned (it is the one
-    // governed home for the names) yet the matcher must be non-vacuous:
-    // every pattern matches the tokens on its own policy line.
+    // governed home for the names).
     expect(scanned.has(DENYLIST_PATH)).toBe(false);
-    const policy = readFileSync(DENYLIST_PATH, "utf8");
-    for (const { label, pattern } of DENYLIST) {
+    // ...which makes it the perfect end-to-end probe: it CONTAINS the very
+    // tokens, so running the REAL pipeline (readFileSync -> whole-file fast
+    // path -> allow-marker skip -> per-line matcher -> report) over it must
+    // produce a hit for every rule. Asserting through `violationsInFile`,
+    // not the raw regexes, is what fails if the scanner itself regresses.
+    const detected = violationsInFile(DENYLIST_PATH);
+    expect(detected.length).toBeGreaterThan(0);
+    for (const { label } of DENYLIST) {
       expect(
-        pattern.test(policy),
-        `${label} pattern must match its own policy line`,
+        detected.some((violation) => violation.includes(label)),
+        `${label} must be reported through the scan pipeline`,
       ).toBe(true);
     }
+  });
+
+  it("rejects a malformed policy file instead of silently disabling itself", () => {
+    // Each of these once produced a SILENTLY weaker gate: no rules at all,
+    // or a rule whose pattern is dead (the whole line compiled as the
+    // regex, or a \r glued onto it) yet still self-consistent enough to
+    // look fine. They must throw instead.
+    expect(() => parseDenylist("# comments only\n")).toThrow(/zero rules/);
+    expect(() => parseDenylist("")).toThrow(/zero rules/);
+    expect(() => parseDenylist("label with spaces not a tab\n")).toThrow(/TAB/);
+    expect(() => parseDenylist("label\t\n")).toThrow(/empty pattern/);
+    // A CRLF checkout must still yield a WORKING pattern, not one with a
+    // trailing carriage return that can never match real source.
+    const [rule] = parseDenylist("gpu\t\\bTEST-ACCEL\\b\r\n");
+    expect(rule?.pattern.test('const a = "TEST-ACCEL";')).toBe(true);
   });
 });
