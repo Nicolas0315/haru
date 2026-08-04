@@ -228,6 +228,55 @@ describe("withQueryBudget", () => {
  * this fails instead of the budget quietly becoming a no-op.
  */
 describe("the driver contract the budget depends on", () => {
+  it("keeps query() lazy so drizzle's batch path still works", () => {
+    const originalFetchFunction = neonConfig.fetchFunction as unknown;
+    // Never resolves: nothing here is awaited, only the returned shape
+    // is inspected.
+    neonConfig.fetchFunction = () => new Promise<Response>(() => undefined);
+    try {
+      const sql = neon("postgresql://user:pass@example.neon.tech/db");
+      const options = { fullResults: true, arrayMode: false };
+      const direct = sql.query("select 1", [], options) as {
+        queryData?: unknown;
+      };
+      const budgeted = withQueryBudget(
+        sql as unknown as Parameters<typeof withQueryBudget>[0],
+        5000,
+      ).query("select 1", [], options) as { queryData?: unknown };
+
+      // `batch` hands these objects to `client.transaction`, which reads
+      // `queryData` off them. An async wrapper would return a bare
+      // promise here and break batch with nothing else failing.
+      expect(direct.queryData).toBeDefined();
+      expect(budgeted.queryData).toBeDefined();
+      expect(budgeted.constructor.name).toBe(direct.constructor.name);
+
+      void (direct as Promise<unknown>).catch(() => undefined);
+      void (budgeted as Promise<unknown>).catch(() => undefined);
+    } finally {
+      neonConfig.fetchFunction = originalFetchFunction;
+    }
+  });
+
+  it("budgets the transaction the batch path actually sends", async () => {
+    let received: Record<string, unknown> | undefined;
+    const client = {
+      query: () => Promise.resolve([]),
+      transaction: (_queries: unknown[], options?: Record<string, unknown>) => {
+        received = options;
+        return Promise.resolve([]);
+      },
+    };
+    const budgeted = withQueryBudget(client, 5000);
+
+    await budgeted.transaction([], { isolationLevel: "Serializable" });
+
+    const fetchOptions = received?.fetchOptions as { signal: AbortSignal };
+    expect(fetchOptions.signal).toBeInstanceOf(AbortSignal);
+    // The caller's own transaction options must survive the merge.
+    expect(received?.isolationLevel).toBe("Serializable");
+  });
+
   it("delivers query-level fetchOptions to the fetch layer", async () => {
     const originalFetchFunction = neonConfig.fetchFunction as unknown;
     let received: RequestInit | undefined;

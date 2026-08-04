@@ -54,7 +54,81 @@ interface NeonQueryClient {
     query: string,
     parameters?: unknown[],
     options?: Record<string, unknown>,
+  ) => unknown;
+  transaction?: (
+    queries: unknown[],
+    options?: Record<string, unknown>,
   ) => Promise<unknown>;
+}
+
+/**
+ * Merge a per-call budget signal into whatever fetch options are already
+ * there, composing rather than replacing a signal the caller supplied.
+ */
+function budgetedOptions(
+  options: Record<string, unknown> | undefined,
+  budgetMs: number,
+): { merged: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } {
+  const callerFetchOptions =
+    (options?.fetchOptions as Record<string, unknown> | undefined) ?? {};
+  const existing = callerFetchOptions.signal;
+  const { signal, timer } = timeoutSignal(
+    budgetMs,
+    undefined,
+    existing instanceof AbortSignal ? existing : undefined,
+  );
+  return {
+    merged: {
+      ...options,
+      fetchOptions: { ...callerFetchOptions, signal },
+    },
+    timer,
+  };
+}
+
+/**
+ * Release the budget timer when the query settles, WITHOUT changing what
+ * the caller gets back.
+ *
+ * Drizzle's `batch` path calls `client.query(...)` per statement and
+ * hands the resulting lazy `NeonQueryPromise` objects straight to
+ * `client.transaction()`, which reads `queryData` and `opts` off them.
+ * Returning `result.finally(...)` - or making the wrapper `async` - would
+ * hand it bare promises instead and break batch silently. So when the
+ * driver returns a lazy query, its `execute` is wrapped in place and the
+ * object itself is returned untouched.
+ */
+function clearTimerWhenSettled<T>(
+  result: T,
+  timer: ReturnType<typeof setTimeout>,
+): T {
+  const clear = () => {
+    clearTimeout(timer);
+  };
+  const lazy = result as {
+    execute?: (...arguments_: unknown[]) => Promise<unknown>;
+  };
+  if (typeof lazy.execute === "function") {
+    const execute = lazy.execute.bind(lazy);
+    lazy.execute = async (...arguments_: unknown[]) => {
+      try {
+        return await execute(...arguments_);
+      } finally {
+        clear();
+      }
+    };
+    return result;
+  }
+  // Anything else (a fake, another driver) is an ordinary promise, and
+  // nothing reads properties off it.
+  const settle = async (): Promise<unknown> => {
+    try {
+      return await result;
+    } finally {
+      clear();
+    }
+  };
+  return settle() as T;
 }
 
 /**
@@ -82,36 +156,41 @@ export function withQueryBudget<T extends NeonQueryClient>(
 ): T {
   return new Proxy(client, {
     get(target, property, receiver) {
+      // `transaction` is the batch path's single HTTP request, so it
+      // needs its own budget: budgeting only `query` would leave the one
+      // call that actually goes over the wire unbounded.
+      if (
+        property === "transaction" &&
+        typeof target.transaction === "function"
+      ) {
+        const transaction = target.transaction.bind(target);
+        return async (
+          queries: unknown[],
+          options?: Record<string, unknown>,
+        ) => {
+          const { merged, timer } = budgetedOptions(options, budgetMs);
+          try {
+            return await transaction(queries, merged);
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+      }
       if (property !== "query") {
         return Reflect.get(target, property, receiver) as unknown;
       }
-      return async (
+      // Synchronous on purpose: an async wrapper would await the lazy
+      // query and return a bare promise, which is what breaks batch.
+      return (
         query: string,
         parameters?: unknown[],
         options?: Record<string, unknown>,
-      ): Promise<unknown> => {
-        // Merge rather than replace: drizzle supplies arrayMode,
-        // fullResults and authToken here, and a caller may already have
-        // set fetchOptions of its own. `timeoutSignal` composes rather
-        // than overwrites an existing signal for the same reason it does
-        // in the HTTP path: one a caller put there must survive.
-        const callerFetchOptions =
-          (options?.fetchOptions as Record<string, unknown> | undefined) ?? {};
-        const { signal, timer } = timeoutSignal(
-          budgetMs,
-          undefined,
-          callerFetchOptions.signal as AbortSignal | undefined,
+      ): unknown => {
+        const { merged, timer } = budgetedOptions(options, budgetMs);
+        return clearTimerWhenSettled(
+          target.query(query, parameters, merged),
+          timer,
         );
-        try {
-          return await target.query(query, parameters, {
-            ...options,
-            fetchOptions: { ...callerFetchOptions, signal },
-          });
-        } finally {
-          // A settled query must not leave its budget timer pending;
-          // otherwise every query holds the event loop for the budget.
-          clearTimeout(timer);
-        }
       };
     },
   });
