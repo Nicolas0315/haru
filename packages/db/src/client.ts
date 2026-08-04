@@ -1,3 +1,4 @@
+import { timeoutSignal } from "@haru/protocol";
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 
@@ -91,16 +92,26 @@ export function withQueryBudget<T extends NeonQueryClient>(
       ): Promise<unknown> => {
         // Merge rather than replace: drizzle supplies arrayMode,
         // fullResults and authToken here, and a caller may already have
-        // set fetchOptions of its own.
+        // set fetchOptions of its own. `timeoutSignal` composes rather
+        // than overwrites an existing signal for the same reason it does
+        // in the HTTP path: one a caller put there must survive.
         const callerFetchOptions =
           (options?.fetchOptions as Record<string, unknown> | undefined) ?? {};
-        return target.query(query, parameters, {
-          ...options,
-          fetchOptions: {
-            ...callerFetchOptions,
-            signal: AbortSignal.timeout(budgetMs),
-          },
-        });
+        const { signal, timer } = timeoutSignal(
+          budgetMs,
+          undefined,
+          callerFetchOptions.signal as AbortSignal | undefined,
+        );
+        try {
+          return await target.query(query, parameters, {
+            ...options,
+            fetchOptions: { ...callerFetchOptions, signal },
+          });
+        } finally {
+          // A settled query must not leave its budget timer pending;
+          // otherwise every query holds the event loop for the budget.
+          clearTimeout(timer);
+        }
       };
     },
   });

@@ -1,6 +1,8 @@
+import { drizzle } from "drizzle-orm/neon-http";
 import { describe, expect, it } from "vitest";
 
 import { DEFAULT_QUERY_BUDGET_MS, withQueryBudget } from "./client.js";
+import { fleets } from "./schema/index.js";
 
 interface RecordedCall {
   readonly query: string;
@@ -46,6 +48,12 @@ async function hangUntilAborted(signal: AbortSignal | undefined) {
   });
 }
 
+function activeTimerCount(): number {
+  return process
+    .getActiveResourcesInfo()
+    .filter((resource) => resource === "Timeout").length;
+}
+
 /**
  * Read the fetch options off a recorded call, failing the test rather
  * than returning undefined: every assertion below is about what the
@@ -88,10 +96,9 @@ describe("withQueryBudget", () => {
     expect(first).not.toBe(second);
   });
 
-  // These two run on REAL timers with a tiny budget. `AbortSignal.timeout`
-  // is implemented natively and is not intercepted by vitest's fake
-  // timers, and keeping the production path on a real signal (so the
-  // fetch is genuinely cancelled) is worth more than a fakeable one.
+  // A tiny real budget rather than fake timers: the assertion is that a
+  // promise rejects, and a 20ms wait states that more directly than
+  // driving the clock would.
   it("rejects once the budget elapses, so a hung store surfaces as a throw", async () => {
     const { client } = fakeClient(hangUntilAborted);
     const budgeted = withQueryBudget(client, 20);
@@ -135,11 +142,68 @@ describe("withQueryBudget", () => {
     expect(calls[0]?.params).toEqual(["a"]);
   });
 
+  it("composes a caller-supplied signal instead of dropping it", async () => {
+    const { client, calls } = fakeClient();
+    const budgeted = withQueryBudget(client, 5000);
+    const callerController = new AbortController();
+
+    await budgeted.query("select 1", [], {
+      fetchOptions: { signal: callerController.signal },
+    });
+
+    const { signal } = fetchOptionsOf(calls[0]);
+    expect(signal.aborted).toBe(false);
+    // Overwriting the caller's signal would make their cancellation a
+    // no-op, silently.
+    callerController.abort(new Error("caller cancelled"));
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("clears the budget timer once the query settles", async () => {
+    const { client } = fakeClient();
+    const budgeted = withQueryBudget(client, 60_000);
+    const timersBefore = activeTimerCount();
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await budgeted.query("select 1", []);
+    }
+
+    // Measured as a delta because the test runner keeps timers of its
+    // own. A leak would hold one 60s timer per query, so five queries
+    // would leave five behind and keep the event loop alive.
+    expect(activeTimerCount()).toBe(timersBefore);
+  });
+
   it("passes every other property through untouched", () => {
     const { client } = fakeClient();
     const budgeted = withQueryBudget(client, 5000);
 
     expect(budgeted.unsafe("raw")).toBe("raw");
+  });
+
+  // The load-bearing test: drizzle resolves `client.query ?? client` once
+  // at construction, so a wrapper that budgets the wrong path compiles,
+  // passes every unit test above, and never applies to a real query.
+  // Only driving real drizzle proves which path is taken.
+  it("applies the budget to the query real drizzle issues", async () => {
+    const { client, calls } = fakeClient();
+    const database = drizzle({
+      client: withQueryBudget(client, 5000) as never,
+      schema: { fleets },
+    });
+
+    // The fake returns [] rather than a Neon result envelope, so drizzle
+    // may reject while mapping it. Irrelevant here: the recording happens
+    // when the query is ISSUED, which is what is under test.
+    try {
+      await database.select().from(fleets).limit(1);
+    } catch {
+      // response-shape mismatch only
+    }
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.query).toContain("fleets");
+    expect(fetchOptionsOf(calls[0]).signal).toBeInstanceOf(AbortSignal);
   });
 
   it("defaults to a budget that is bounded and well under undici's", () => {
