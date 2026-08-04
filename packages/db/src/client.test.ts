@@ -1,3 +1,4 @@
+import { neon, neonConfig } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { describe, expect, it } from "vitest";
 
@@ -211,5 +212,52 @@ describe("withQueryBudget", () => {
     // the exact number would just restate the source.
     expect(DEFAULT_QUERY_BUDGET_MS).toBeGreaterThan(0);
     expect(DEFAULT_QUERY_BUDGET_MS).toBeLessThanOrEqual(30_000);
+  });
+});
+
+/**
+ * Everything above asserts what the wrapper HANDS the client, against a
+ * fake. That is only meaningful while the fake reproduces the real
+ * driver's contract, and nothing above checks THAT: a fake which invents
+ * a parameter the driver ignores would keep every assertion green while
+ * production stayed unbounded.
+ *
+ * So this pins the assumption itself against the installed driver: that
+ * `fetchOptions` passed as the third argument to `query` reaches the
+ * fetch layer. If a future release moves it to construction-time only,
+ * this fails instead of the budget quietly becoming a no-op.
+ */
+describe("the driver contract the budget depends on", () => {
+  it("delivers query-level fetchOptions to the fetch layer", async () => {
+    const originalFetchFunction = neonConfig.fetchFunction as unknown;
+    let received: RequestInit | undefined;
+    neonConfig.fetchFunction = (_url: string, options: RequestInit) => {
+      received = options;
+      return Promise.resolve(
+        Response.json(
+          {
+            command: "SELECT",
+            fields: [],
+            rows: [],
+            rowCount: 0,
+          },
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    };
+    try {
+      const sql = neon("postgresql://user:pass@example.neon.tech/db");
+      const controller = new AbortController();
+
+      await sql.query("select 1", [], {
+        fetchOptions: { signal: controller.signal },
+      });
+
+      expect(received?.signal).toBe(controller.signal);
+    } finally {
+      // `neonConfig` is process-global; leaving a stub installed would
+      // silently rewrite every later query in this worker.
+      neonConfig.fetchFunction = originalFetchFunction;
+    }
   });
 });
