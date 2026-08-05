@@ -213,6 +213,65 @@ describe("withQueryBudget", () => {
     expect(DEFAULT_QUERY_BUDGET_MS).toBeGreaterThan(0);
     expect(DEFAULT_QUERY_BUDGET_MS).toBeLessThanOrEqual(30_000);
   });
+
+  it("rejects a budget setTimeout would silently round to 1ms", () => {
+    const { client } = fakeClient();
+    // setTimeout coerces these rather than refusing them, which would
+    // abort every query almost immediately and read as a total outage.
+    for (const budget of [0, -1, NaN, Infinity]) {
+      expect(() =>
+        withQueryBudget(client, budget).query("select 1", []),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it("does not crash or strand a timer when the driver returns nothing", () => {
+    const client = {
+      query: (_query: string, _parameters?: unknown[]): Promise<unknown> =>
+        null as unknown as Promise<unknown>,
+    };
+    const budgeted = withQueryBudget(client, 60_000);
+    const before = activeTimerCount();
+
+    expect(budgeted.query("select 1", [])).toBeNull();
+    expect(activeTimerCount()).toBe(before);
+  });
+
+  it("budgets the transaction the batch path actually sends", async () => {
+    let received: Record<string, unknown> | undefined;
+    const client = {
+      query: () => Promise.resolve([]),
+      transaction: (
+        _queriesOrFunction: unknown[] | ((...arguments_: unknown[]) => unknown),
+        options?: Record<string, unknown>,
+      ) => {
+        received = options;
+        return Promise.resolve([]);
+      },
+    };
+    const budgeted = withQueryBudget(client, 5000);
+
+    await budgeted.transaction([], { isolationLevel: "Serializable" });
+
+    const fetchOptions = received?.fetchOptions as { signal: AbortSignal };
+    expect(fetchOptions.signal).toBeInstanceOf(AbortSignal);
+    // The caller's own transaction options must survive the merge.
+    expect(received?.isolationLevel).toBe("Serializable");
+  });
+
+  it("does not choke on the documented callback form of transaction", async () => {
+    const client = {
+      query: () => Promise.resolve([]),
+      transaction: (_queriesOrFunction: unknown, _options?: unknown) =>
+        Promise.resolve(["ok"]),
+    };
+    const budgeted = withQueryBudget(client, 5000);
+
+    // Neon documents `transaction(txn => [...])` alongside the array
+    // form. Iterating that callback for per-statement timers threw inside
+    // `finally`, turning a SUCCESSFUL transaction into a failure.
+    await expect(budgeted.transaction(() => [], {})).resolves.toEqual(["ok"]);
+  });
 });
 
 /**
@@ -291,65 +350,6 @@ describe("the driver contract the budget depends on", () => {
     } finally {
       neonConfig.fetchFunction = originalFetchFunction;
     }
-  });
-
-  it("rejects a budget setTimeout would silently round to 1ms", () => {
-    const { client } = fakeClient();
-    // setTimeout coerces these rather than refusing them, which would
-    // abort every query almost immediately and read as a total outage.
-    for (const budget of [0, -1, NaN, Infinity]) {
-      expect(() =>
-        withQueryBudget(client, budget).query("select 1", []),
-      ).toThrow(RangeError);
-    }
-  });
-
-  it("does not crash or strand a timer when the driver returns nothing", () => {
-    const client = {
-      query: (_query: string, _parameters?: unknown[]): Promise<unknown> =>
-        null as unknown as Promise<unknown>,
-    };
-    const budgeted = withQueryBudget(client, 60_000);
-    const before = activeTimerCount();
-
-    expect(budgeted.query("select 1", [])).toBeNull();
-    expect(activeTimerCount()).toBe(before);
-  });
-
-  it("budgets the transaction the batch path actually sends", async () => {
-    let received: Record<string, unknown> | undefined;
-    const client = {
-      query: () => Promise.resolve([]),
-      transaction: (
-        _queriesOrFunction: unknown[] | ((...arguments_: unknown[]) => unknown),
-        options?: Record<string, unknown>,
-      ) => {
-        received = options;
-        return Promise.resolve([]);
-      },
-    };
-    const budgeted = withQueryBudget(client, 5000);
-
-    await budgeted.transaction([], { isolationLevel: "Serializable" });
-
-    const fetchOptions = received?.fetchOptions as { signal: AbortSignal };
-    expect(fetchOptions.signal).toBeInstanceOf(AbortSignal);
-    // The caller's own transaction options must survive the merge.
-    expect(received?.isolationLevel).toBe("Serializable");
-  });
-
-  it("does not choke on the documented callback form of transaction", async () => {
-    const client = {
-      query: () => Promise.resolve([]),
-      transaction: (_queriesOrFunction: unknown, _options?: unknown) =>
-        Promise.resolve(["ok"]),
-    };
-    const budgeted = withQueryBudget(client, 5000);
-
-    // Neon documents `transaction(txn => [...])` alongside the array
-    // form. Iterating that callback for per-statement timers threw inside
-    // `finally`, turning a SUCCESSFUL transaction into a failure.
-    await expect(budgeted.transaction(() => [], {})).resolves.toEqual(["ok"]);
   });
 
   it("delivers query-level fetchOptions to the fetch layer", async () => {
