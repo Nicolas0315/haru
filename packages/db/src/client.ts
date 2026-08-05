@@ -55,8 +55,11 @@ interface NeonQueryClient {
     parameters?: unknown[],
     options?: Record<string, unknown>,
   ) => unknown;
+  // Neon documents BOTH an array of queries and a callback returning
+  // them; a signature that only admitted the array would be a lie the
+  // wrapper then acts on.
   transaction?: (
-    queries: unknown[],
+    queriesOrFunction: unknown[] | ((...arguments_: unknown[]) => unknown),
     options?: Record<string, unknown>,
   ) => Promise<unknown>;
 }
@@ -191,7 +194,7 @@ export function withQueryBudget<T extends NeonQueryClient>(
       ) {
         const transaction = target.transaction.bind(target);
         return async (
-          queries: unknown[],
+          queries: unknown[] | ((...arguments_: unknown[]) => unknown),
           options?: Record<string, unknown>,
         ) => {
           const { merged, timer } = budgetedOptions(options, budgetMs);
@@ -203,11 +206,22 @@ export function withQueryBudget<T extends NeonQueryClient>(
             // ran, and batch never executes them individually, so without
             // this each batched statement holds a timer for the full
             // budget.
-            for (const query of queries) {
-              const tagged = query as BudgetedLazyQuery | null;
-              const statementTimer = tagged?.[BUDGET_TIMER];
-              if (statementTimer !== undefined) {
-                clearTimeout(statementTimer);
+            //
+            // Only for the ARRAY form. Neon also documents a callback
+            // form (`transaction(txn => [...])`), whose statements are
+            // built by Neon's own in-transaction sql function and never
+            // pass through this wrapper. Iterating that callback would
+            // throw inside `finally` and turn a SUCCESSFUL transaction
+            // into a failure.
+            // A bare `return` here would be a `finally` return, which
+            // overwrites the value `try` produced.
+            if (Array.isArray(queries)) {
+              for (const query of queries) {
+                const tagged = query as BudgetedLazyQuery | null;
+                const statementTimer = tagged?.[BUDGET_TIMER];
+                if (statementTimer !== undefined) {
+                  clearTimeout(statementTimer);
+                }
               }
             }
           }

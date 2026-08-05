@@ -239,9 +239,11 @@ describe("the driver contract the budget depends on", () => {
       const direct = sql.query("select 1", [], options) as {
         queryData?: unknown;
       };
+      // A short budget: this test never executes the query, so nothing
+      // clears the timer and a long one would add a real tail to the run.
       const budgeted = withQueryBudget(
         sql as unknown as Parameters<typeof withQueryBudget>[0],
-        5000,
+        20,
       ).query("select 1", [], options) as { queryData?: unknown };
 
       // `batch` hands these objects to `client.transaction`, which reads
@@ -318,7 +320,10 @@ describe("the driver contract the budget depends on", () => {
     let received: Record<string, unknown> | undefined;
     const client = {
       query: () => Promise.resolve([]),
-      transaction: (_queries: unknown[], options?: Record<string, unknown>) => {
+      transaction: (
+        _queriesOrFunction: unknown[] | ((...arguments_: unknown[]) => unknown),
+        options?: Record<string, unknown>,
+      ) => {
         received = options;
         return Promise.resolve([]);
       },
@@ -331,6 +336,20 @@ describe("the driver contract the budget depends on", () => {
     expect(fetchOptions.signal).toBeInstanceOf(AbortSignal);
     // The caller's own transaction options must survive the merge.
     expect(received?.isolationLevel).toBe("Serializable");
+  });
+
+  it("does not choke on the documented callback form of transaction", async () => {
+    const client = {
+      query: () => Promise.resolve([]),
+      transaction: (_queriesOrFunction: unknown, _options?: unknown) =>
+        Promise.resolve(["ok"]),
+    };
+    const budgeted = withQueryBudget(client, 5000);
+
+    // Neon documents `transaction(txn => [...])` alongside the array
+    // form. Iterating that callback for per-statement timers threw inside
+    // `finally`, turning a SUCCESSFUL transaction into a failure.
+    await expect(budgeted.transaction(() => [], {})).resolves.toEqual(["ok"]);
   });
 
   it("delivers query-level fetchOptions to the fetch layer", async () => {
