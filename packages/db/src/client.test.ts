@@ -251,11 +251,67 @@ describe("the driver contract the budget depends on", () => {
       expect(budgeted.queryData).toBeDefined();
       expect(budgeted.constructor.name).toBe(direct.constructor.name);
 
-      void (direct as Promise<unknown>).catch(() => undefined);
-      void (budgeted as Promise<unknown>).catch(() => undefined);
+      // Deliberately NOT subscribed: a lazy Neon query is a thenable, so
+      // even `.catch()` would call `execute` and fire the request this
+      // test claims never runs.
     } finally {
       neonConfig.fetchFunction = originalFetchFunction;
     }
+  });
+
+  it("releases the per-statement budgets that batch never executes", async () => {
+    const originalFetchFunction = neonConfig.fetchFunction as unknown;
+    neonConfig.fetchFunction = () => new Promise<Response>(() => undefined);
+    try {
+      const sql = neon("postgresql://user:pass@example.neon.tech/db");
+      // Stubbed so this measures timer bookkeeping, not the request.
+      (sql as unknown as { transaction: unknown }).transaction = () =>
+        Promise.resolve([]);
+      const budgeted = withQueryBudget(
+        sql as unknown as Parameters<typeof withQueryBudget>[0],
+        60_000,
+      );
+      const before = activeTimerCount();
+
+      const statements = [1, 2, 3].map((n) =>
+        budgeted.query(`select ${String(n)}`, [], {
+          fullResults: true,
+          arrayMode: false,
+        }),
+      );
+      // Each build starts a budget, and batch hands them off unexecuted,
+      // so the execute hook never runs for any of them.
+      expect(activeTimerCount() - before).toBe(statements.length);
+
+      await budgeted.transaction?.(statements, {});
+
+      expect(activeTimerCount()).toBe(before);
+    } finally {
+      neonConfig.fetchFunction = originalFetchFunction;
+    }
+  });
+
+  it("rejects a budget setTimeout would silently round to 1ms", () => {
+    const { client } = fakeClient();
+    // setTimeout coerces these rather than refusing them, which would
+    // abort every query almost immediately and read as a total outage.
+    for (const budget of [0, -1, NaN, Infinity]) {
+      expect(() =>
+        withQueryBudget(client, budget).query("select 1", []),
+      ).toThrow(RangeError);
+    }
+  });
+
+  it("does not crash or strand a timer when the driver returns nothing", () => {
+    const client = {
+      query: (_query: string, _parameters?: unknown[]): Promise<unknown> =>
+        null as unknown as Promise<unknown>,
+    };
+    const budgeted = withQueryBudget(client, 60_000);
+    const before = activeTimerCount();
+
+    expect(budgeted.query("select 1", [])).toBeNull();
+    expect(activeTimerCount()).toBe(before);
   });
 
   it("budgets the transaction the batch path actually sends", async () => {

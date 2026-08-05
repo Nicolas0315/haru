@@ -65,10 +65,26 @@ interface NeonQueryClient {
  * Merge a per-call budget signal into whatever fetch options are already
  * there, composing rather than replacing a signal the caller supplied.
  */
+const BUDGET_TIMER = Symbol("haru.queryBudgetTimer");
+
+/** A lazy Neon query, tagged with the budget timer its build created. */
+interface BudgetedLazyQuery {
+  execute?: (...arguments_: unknown[]) => Promise<unknown>;
+  [BUDGET_TIMER]?: ReturnType<typeof setTimeout>;
+}
+
 function budgetedOptions(
   options: Record<string, unknown> | undefined,
   budgetMs: number,
 ): { merged: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } {
+  // setTimeout coerces NaN, Infinity and negatives to a 1ms delay rather
+  // than rejecting them, which would abort every query almost instantly
+  // and read as a total outage. Fail at the call instead.
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
+    throw new RangeError(
+      `query budget must be a positive finite number of milliseconds, got ${String(budgetMs)}`,
+    );
+  }
   const callerFetchOptions =
     (options?.fetchOptions as Record<string, unknown> | undefined) ?? {};
   const existing = callerFetchOptions.signal;
@@ -105,10 +121,18 @@ function clearTimerWhenSettled<T>(
   const clear = () => {
     clearTimeout(timer);
   };
-  const lazy = result as {
-    execute?: (...arguments_: unknown[]) => Promise<unknown>;
-  };
+  // A driver oddity or a loose double could hand back null; reading
+  // `execute` off it would crash inside the wrapper AND strand the timer.
+  if (result === null || result === undefined) {
+    clear();
+    return result;
+  }
+  const lazy = result as BudgetedLazyQuery;
   if (typeof lazy.execute === "function") {
+    // `batch` passes this object to `transaction()` WITHOUT executing it,
+    // so the execute hook below never runs for a batched statement. Tag
+    // the timer here so the transaction wrapper can release it.
+    lazy[BUDGET_TIMER] = timer;
     const execute = lazy.execute.bind(lazy);
     lazy.execute = async (...arguments_: unknown[]) => {
       try {
@@ -123,7 +147,9 @@ function clearTimerWhenSettled<T>(
   // nothing reads properties off it.
   const settle = async (): Promise<unknown> => {
     try {
-      return await result;
+      // `Promise.resolve` rather than a cast: `result` is generic here,
+      // and a bare await of it is not provably thenable.
+      return await Promise.resolve(result);
     } finally {
       clear();
     }
@@ -173,6 +199,17 @@ export function withQueryBudget<T extends NeonQueryClient>(
             return await transaction(queries, merged);
           } finally {
             clearTimeout(timer);
+            // Every statement built its own budget when the query wrapper
+            // ran, and batch never executes them individually, so without
+            // this each batched statement holds a timer for the full
+            // budget.
+            for (const query of queries) {
+              const tagged = query as BudgetedLazyQuery | null;
+              const statementTimer = tagged?.[BUDGET_TIMER];
+              if (statementTimer !== undefined) {
+                clearTimeout(statementTimer);
+              }
+            }
           }
         };
       }
