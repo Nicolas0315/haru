@@ -1,5 +1,6 @@
 import { detectDegradedEscalation } from "@haru/core";
 import { fleetLayoutSchema } from "@haru/protocol";
+import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -10,6 +11,7 @@ import {
 import { applyFleetLayout } from "./repo/layout.js";
 import { transitionSlot } from "./repo/slots.js";
 import { getFleetSnapshot } from "./repo/snapshots.js";
+import { domains, slots } from "./schema/index.js";
 import { createTestDatabase, loadExampleFleetLayout } from "./testing/index.js";
 
 import type { HaruDatabase } from "./client.js";
@@ -95,14 +97,29 @@ async function bothVerdicts(now: Date): Promise<{
   return { inMemory: isInMemory, inSql: isInSql };
 }
 
-/** Put the active into the degraded-past-grace state both sides require. */
+/**
+ * Put the active into the degraded-past-grace state both sides require,
+ * and assert it took.
+ *
+ * The SQL side also guards on the routing pointer and on no operation
+ * being in flight, so a fixture change could make it answer `false` for a
+ * reason that has nothing to do with viability, and these cases would
+ * still "agree" while testing nothing. Pinning the preconditions keeps a
+ * green run meaningful.
+ */
 async function degradeActive(now: Date): Promise<void> {
-  await transitionDomain(
+  const isMoved = await transitionDomain(
     database,
     active().id,
     ["ready"],
     "degraded",
     new Date(now.getTime() - DEGRADED_FOR_MS),
+  );
+  expect(isMoved).toBe(true);
+  const live = await getFleetSnapshot(database, "default");
+  expect(live?.activeDomainId).toBe(active().id);
+  expect(live?.domains.find((d) => d.id === active().id)?.state).toBe(
+    "degraded",
   );
 }
 
@@ -167,6 +184,41 @@ describe("viable-standby predicate parity (core vs SQL)", () => {
       ["serving", "sleeping"],
       "failed",
     );
+
+    const { inMemory, inSql } = await bothVerdicts(now);
+    expect(inSql).toBe(inMemory);
+    expect(inMemory).toBe(false);
+  });
+
+  it("agrees when the standby has no supervisor to drive", async () => {
+    const now = new Date();
+    await degradeActive(now);
+    await markDomainSeen(database, standby().id, now);
+    // No repository helper unbinds a supervisor, and the point is to
+    // exercise the stored state both predicates read, so the column is
+    // cleared directly.
+    await database
+      .update(domains)
+      .set({ supervisorUrl: null })
+      .where(eq(domains.id, standby().id));
+
+    const { inMemory, inSql } = await bothVerdicts(now);
+    expect(inSql).toBe(inMemory);
+    expect(inMemory).toBe(false);
+  });
+
+  it("agrees when the standby has no inference slot at all", async () => {
+    const now = new Date();
+    await degradeActive(now);
+    await markDomainSeen(database, standby().id, now);
+    // Same reasoning as above: layout apply is additive, so removing a
+    // slot is not something the repository layer offers.
+    const standbyId = standby().id;
+    const standbyInferenceSlots = and(
+      eq(slots.domainId, standbyId),
+      eq(slots.kind, "inference"),
+    );
+    await database.delete(slots).where(standbyInferenceSlots);
 
     const { inMemory, inSql } = await bothVerdicts(now);
     expect(inSql).toBe(inMemory);
