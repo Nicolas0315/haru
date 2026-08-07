@@ -188,20 +188,17 @@ describe("withQueryBudget", () => {
   // passes every unit test above, and never applies to a real query.
   // Only driving real drizzle proves which path is taken.
   it("applies the budget to the query real drizzle issues", async () => {
-    const { client, calls } = fakeClient();
+    // A real `fullResults` envelope rather than the default []: drizzle
+    // then completes normally, so the query is awaited without a catch.
+    // Swallowing "the response shape was wrong" would also swallow a
+    // wrapper that threw after recording the call.
+    const { client, calls } = fakeClient(() => Promise.resolve({ rows: [] }));
     const database = drizzle({
       client: withQueryBudget(client, 5000) as never,
       schema: { fleets },
     });
 
-    // The fake returns [] rather than a Neon result envelope, so drizzle
-    // may reject while mapping it. Irrelevant here: the recording happens
-    // when the query is ISSUED, which is what is under test.
-    try {
-      await database.select().from(fleets).limit(1);
-    } catch {
-      // response-shape mismatch only
-    }
+    await expect(database.select().from(fleets).limit(1)).resolves.toEqual([]);
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.query).toContain("fleets");
