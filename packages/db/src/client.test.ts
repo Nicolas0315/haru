@@ -1,3 +1,4 @@
+import { fleetPolicySchema } from "@haru/protocol";
 import { neon, neonConfig } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { describe, expect, it } from "vitest";
@@ -207,11 +208,17 @@ describe("withQueryBudget", () => {
     expect(fetchOptionsOf(calls[0]).signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("defaults to a budget that is bounded and well under undici's", () => {
-    // The point of the constant is that it exists and is small; pinning
-    // the exact number would just restate the source.
+  it("defaults to a budget the step that issues the read outlives", () => {
+    // Pinning the exact number would only restate the source and would
+    // fail on any deliberate tuning. What the constant's comment
+    // actually CLAIMS is a relationship: the budget does not exceed
+    // `switchActiveTimeoutMs`, so a hung pointer read cannot outlive the
+    // step that issued it. Assert that, against the live policy default,
+    // so raising either number without the other fails here.
+    const { switchActiveTimeoutMs } = fleetPolicySchema.parse({});
+
     expect(DEFAULT_QUERY_BUDGET_MS).toBeGreaterThan(0);
-    expect(DEFAULT_QUERY_BUDGET_MS).toBeLessThanOrEqual(30_000);
+    expect(DEFAULT_QUERY_BUDGET_MS).toBeLessThanOrEqual(switchActiveTimeoutMs);
   });
 
   it("rejects a budget setTimeout would silently round to 1ms", () => {
