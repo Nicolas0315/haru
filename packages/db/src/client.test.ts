@@ -223,12 +223,15 @@ describe("withQueryBudget", () => {
 
   it("rejects a budget setTimeout would silently round to 1ms", () => {
     const { client } = fakeClient();
-    // setTimeout coerces these rather than refusing them, which would
-    // abort every query almost immediately and read as a total outage.
-    for (const budget of [0, -1, NaN, Infinity]) {
-      expect(() =>
-        withQueryBudget(client, budget).query("select 1", []),
-      ).toThrow(RangeError);
+    // setTimeout coerces all of these rather than refusing them, which
+    // would abort every query almost immediately and read as a total
+    // outage. 0.5 and 2^31 are the two that look plausible in a config
+    // file, and are exactly what a finite-and-positive check misses.
+    for (const budget of [0, -1, NaN, Infinity, 0.5, 2_147_483_648]) {
+      // Asserted on the CONSTRUCTOR, not on a query: a budget rejected
+      // only once someone runs a statement reports the misconfiguration
+      // from an arbitrary call site instead of from the wiring.
+      expect(() => withQueryBudget(client, budget)).toThrow(RangeError);
     }
   });
 

@@ -1,4 +1,4 @@
-import { timeoutSignal } from "@haru/protocol";
+import { timeoutMsSchema, timeoutSignal } from "@haru/protocol";
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 
@@ -80,14 +80,6 @@ function budgetedOptions(
   options: Record<string, unknown> | undefined,
   budgetMs: number,
 ): { merged: Record<string, unknown>; timer: ReturnType<typeof setTimeout> } {
-  // setTimeout coerces NaN, Infinity and negatives to a 1ms delay rather
-  // than rejecting them, which would abort every query almost instantly
-  // and read as a total outage. Fail at the call instead.
-  if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
-    throw new RangeError(
-      `query budget must be a positive finite number of milliseconds, got ${String(budgetMs)}`,
-    );
-  }
   const callerFetchOptions =
     (options?.fetchOptions as Record<string, unknown> | undefined) ?? {};
   const existing = callerFetchOptions.signal;
@@ -183,6 +175,17 @@ export function withQueryBudget<T extends NeonQueryClient>(
   client: T,
   budgetMs: number,
 ): T {
+  // Every other millisecond budget in the repo is bounded by
+  // `timeoutMsSchema`, whose comment states the reason: setTimeout turns
+  // both a sub-millisecond delay and one past 2^31-1 into ~1ms, so a
+  // misconfigured budget aborts every query and reads as a total outage.
+  // Reuse that rule rather than restating it, and reject at wiring time
+  // so the failure names the config instead of an arbitrary query.
+  if (!timeoutMsSchema.safeParse(budgetMs).success) {
+    throw new RangeError(
+      `query budget must be a positive integer of milliseconds no greater than 2147483647, got ${String(budgetMs)}`,
+    );
+  }
   return new Proxy(client, {
     get(target, property, receiver) {
       // `transaction` is the batch path's single HTTP request, so it
