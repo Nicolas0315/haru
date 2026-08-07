@@ -205,13 +205,17 @@ describe("withQueryBudget", () => {
     expect(fetchOptionsOf(calls[0]).signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("defaults to a budget the step that issues the read outlives", () => {
+  it("defaults to a budget no wider than the tightest step it runs inside", () => {
     // Pinning the exact number would only restate the source and would
-    // fail on any deliberate tuning. What the constant's comment
-    // actually CLAIMS is a relationship: the budget does not exceed
-    // `switchActiveTimeoutMs`, so a hung pointer read cannot outlive the
-    // step that issued it. Assert that, against the live policy default,
-    // so raising either number without the other fails here.
+    // fail on any deliberate tuning. What the constant's comment claims
+    // is a relationship: the budget does not exceed
+    // `switchActiveTimeoutMs`, the step whose work is a single pointer
+    // CAS. Assert that against the live policy default, so raising
+    // either number without the other fails here.
+    //
+    // The relationship is a bound, not a containment guarantee: this
+    // budget restarts at each query while the step timeout runs from
+    // step entry, so only a read issued AT entry is covered by it.
     const { switchActiveTimeoutMs } = fleetPolicySchema.parse({});
 
     expect(DEFAULT_QUERY_BUDGET_MS).toBeGreaterThan(0);

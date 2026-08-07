@@ -33,7 +33,15 @@ export type HaruDatabase = PgDatabase<PgQueryResultHKT, typeof schema>;
  * healthy p99 (a single statement over Neon HTTP is tens of
  * milliseconds): the bound is there to make an outage unmistakable, not
  * to police latency. It also does not exceed `switchActiveTimeoutMs`, so
- * a hung pointer read cannot outlive the step that issued it.
+ * a read issued as a step ENTERS is bounded by that step's own budget.
+ *
+ * That is deliberately weaker than what `withSupervisor` gets. Supervisor
+ * calls are capped to what remains of the absolute `stepDeadlineMs` at
+ * call time, so one issued with 1ms left cannot run a full per-call
+ * timeout on top; this budget restarts at every query, so a read issued
+ * late in a step can still outlive it. Making the two equivalent means
+ * threading the step deadline down into the transport, which is a larger
+ * change than bounding it at all.
  */
 export const DEFAULT_QUERY_BUDGET_MS = 10_000;
 
