@@ -9,7 +9,7 @@ packages:
 catalog:
   "@electric-sql/pglite": "^0.5.4"
   "@eslint/js": "^10.0.1"
-  "@hono/node-server": "^2.0.8"
+  "@hono/node-server": "^2.0.10"
   "@neondatabase/serverless": "^1.1.0"
   "@stylistic/eslint-plugin": "^5.10.0"
   "@types/eslint-plugin-promise": "^7.3.0"
