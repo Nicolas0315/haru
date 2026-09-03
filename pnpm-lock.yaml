@@ -97,8 +97,8 @@ catalogs:
       specifier: ^8.63.0
       version: 8.63.0
     undici:
-      specifier: ^8.7.0
-      version: 8.7.0
+      specifier: ^8.9.0
+      version: 8.10.0
     vitest:
       specifier: ^4.1.10
       version: 4.1.10
@@ -340,7 +340,7 @@ importers:
         version: 4.13.5
       undici:
         specifier: 'catalog:'
-        version: 8.7.0
+        version: 8.10.0
       zod:
         specifier: 'catalog:'
         version: 4.4.3
@@ -2710,8 +2710,8 @@ packages:
   undici-types@8.3.0:
     resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
 
-  undici@8.7.0:
-    resolution: {integrity: sha512-N7iQtfyLhIMOFgQubvmLV26svHpO0bqKnAiWotTQCVKCmWrcGbBotPuW1x+xwYZ2VHdSTVUfPQQnlEt1/LouTQ==}
+  undici@8.10.0:
+    resolution: {integrity: sha512-HvltHd7avK13QIw/oLe4qoOLyoVSoafqJ2jYOrtMRBkbYT31eiBQ8O0ehRKZiEZCMEyLFQNIADpgCWC5fALvYQ==}
     engines: {node: '>=22.19.0'}
 
   unrs-resolver@1.12.2:
@@ -4643,7 +4643,7 @@ snapshots:
 
   undici-types@8.3.0: {}
 
-  undici@8.7.0: {}
+  undici@8.10.0: {}
 
   unrs-resolver@1.12.2:
     dependencies:
