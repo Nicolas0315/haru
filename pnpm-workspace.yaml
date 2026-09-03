@@ -9,25 +9,25 @@ packages:
 catalog:
   "@electric-sql/pglite": "^0.5.4"
   "@eslint/js": "^10.0.1"
-  "@hono/node-server": "^2.0.10"
+  "@hono/node-server": "^2.1.1"
   "@neondatabase/serverless": "^1.1.0"
   "@stylistic/eslint-plugin": "^5.10.0"
   "@types/eslint-plugin-promise": "^7.3.0"
-  "@types/node": "^26"
+  "@types/node": "^26.1.0"
   "@types/pg": "^8.20.0"
   "@vitest/coverage-v8": "^4.1.10"
-  "@vitest/eslint-plugin": "^1.6.17"
+  "@vitest/eslint-plugin": "^1.6.21"
   drizzle-kit: "^0.31.10"
   drizzle-orm: "^0.45.2"
   eslint: "^10.6.0"
-  eslint-import-resolver-typescript: "^4.4.4"
-  eslint-plugin-import-x: "^4.16.2"
-  eslint-plugin-n: "^18.0.1"
+  eslint-import-resolver-typescript: "^4.4.5"
+  eslint-plugin-import-x: "^4.17.1"
+  eslint-plugin-n: "^18.2.1"
   eslint-plugin-promise: "^7.3.0"
-  eslint-plugin-regexp: "^3.1.0"
+  eslint-plugin-regexp: "^3.1.1"
   eslint-plugin-unicorn: "^71.1.0"
   globals: "^17.7.0"
-  hono: "^4.12.34"
+  hono: "^4.13.5"
   # node-postgres, used only by the optional real-Postgres test lane
   # (HARU_TEST_DATABASE_URL); production stays on the Neon HTTP driver.
   pg: "^8.22.0"
@@ -44,7 +44,7 @@ catalog:
   # Dedicated dispatcher for the chat proxy: Node's bundled fetch
   # enforces a fixed 300s headersTimeout that silently capped
   # HARU_CHAT_HEADER_TIMEOUT_MS (see haru-server/src/chat-fetch.ts).
-  undici: "^8.9.0"
+  undici: "^8.10.0"
   vitest: "^4.1.10"
   yaml: "^2.9.0"
   zod: "^4.4.3"
@@ -71,3 +71,9 @@ blockExoticSubdeps: true
 allowBuilds:
   esbuild: true
   unrs-resolver: true
+minimumReleaseAgeExclude:
+  - esbuild@0.24.3
+  - brace-expansion@5.0.8 || 5.0.9
+  - postcss@8.5.18 || 8.5.23
+  - nanoid@3.3.16 || 3.3.18
+  - browserslist@4.28.7
