@@ -667,6 +667,16 @@ export function createApp(dependencies: AppDependencies) {
    * KNOWN_ISSUES required of it: driven by what the store SAYS, or by
    * capacity, never by a lookup that THREW.
    *
+   * Since `loadsInFlight` took hold, this is defence in depth rather
+   * than a live guard, and no test can tell the two apart. A fleet
+   * with a load in flight is never a victim, and `generationBeforeLoad`
+   * is captured in the same synchronous step that registers the load,
+   * so a capacity eviction has no in-flight load left to fence.
+   * Swapping this for forgetFleet keeps every test green. It stays
+   * because the property is the one the surrounding code reasons
+   * about, and because the cost of being wrong here is a lost
+   * fail-open rather than a visible failure.
+   *
    * The companion indexes are pruned with the entry so they stay the
    * same order as the cache rather than outliving it. That pruning is
    * about bounded growth, not behaviour: `cachedFor` needs BOTH the

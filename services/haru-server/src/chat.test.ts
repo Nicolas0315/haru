@@ -1633,10 +1633,9 @@ describe("chat snapshot cache size cap", () => {
     expect((await requestA).status).toBe(200);
   });
 
-  it("a capacity eviction does not suppress a snapshot load already in flight", async () => {
+  it("publishes a resumed reload and trims the other fleet when it completes", async () => {
     await seedFleet("second");
-    // TTL 0 forces every request to reload rather than take a cache hit,
-    // which is what puts a load in flight to race the eviction.
+    // TTL 0 forces every request to reload rather than take a cache hit.
     const { chat, breakIt, gateSelect } = cappedApp({
       snapshotCacheMaxEntries: 1,
       snapshotCacheTtlMs: 0,
@@ -1649,20 +1648,18 @@ describe("chat snapshot cache size cap", () => {
     const requestA = chat("default");
     await gate.reached;
 
-    // A full request for the other fleet publishes its entry, which
-    // pushes the cache over the cap and evicts "default" for CAPACITY.
+    // The other fleet publishes and pushes the cache over the cap, but
+    // nothing can be evicted yet: "default" is pinned by A's read and
+    // "second" is exempt as the entry just published.
     expect((await chat("second")).status).toBe(200);
 
-    // A's load now completes. A capacity eviction is not a store
-    // verdict, so unlike forgetFleet it must not have quarantined the
-    // fleet's generation: A is still entitled to publish what it read.
+    // A's load completes. Finishing the read is what releases the pin
+    // and runs the trim, and "second" is then the only candidate.
     gate.proceed();
     expect((await requestA).status).toBe(200);
 
-    // The proof: "default" fail-opens again. Had the eviction bumped the
-    // forgotten generation, A's publish would have been suppressed as a
-    // lost race and this would be 503. (Publishing it re-crossed the cap
-    // in turn, so "second" is now the evicted one.)
+    // A's result was published, so "default" fails open; "second" is
+    // the entry the trim took.
     breakIt();
     const stale = await chat("default");
     expect(stale.status).toBe(200);
