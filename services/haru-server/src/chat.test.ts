@@ -1466,6 +1466,68 @@ describe("chat snapshot cache size cap", () => {
     expect((await chat("second")).status).toBe(503);
   });
 
+  it("treats a cap of 0 as 1 rather than as a disabled cache", async () => {
+    await seedFleet("second");
+    const { chat, breakIt } = cappedApp({ snapshotCacheMaxEntries: 0 });
+
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("second")).status).toBe(200);
+
+    // A literal 0 would evict every entry the instant it is published,
+    // which disables fail-open rather than shrinking the cache. One
+    // fleet must survive.
+    breakIt();
+    const survivor = await chat("second");
+    expect(survivor.status).toBe(200);
+    expect(survivor.headers.get("x-haru-routing")).toBe("stale");
+    expect((await chat("default")).status).toBe(503);
+  });
+
+  it("does not evict an entry a snapshot load is reading, which would fence that load", async () => {
+    await seedFleet("second");
+    // TTL 0 makes every request reload while KEEPING the entry cached,
+    // which is the state this race needs.
+    const { chat, breakIt, gateSelect } = cappedApp({
+      snapshotCacheMaxEntries: 1,
+      snapshotCacheTtlMs: 0,
+    });
+    expect((await chat("default")).status).toBe(200);
+
+    // A freezes inside its reload of "default" (access 1 = pointer
+    // read, access 2 = fleet row).
+    const gateA = gateSelect(2);
+    const requestA = chat("default");
+    await gateA.reached;
+
+    // Publishing the other fleet crosses the cap. The only eviction
+    // candidate is the entry A is reading, so the cache stays over the
+    // cap instead.
+    expect((await chat("second")).status).toBe(200);
+
+    // B reloads the same fleet and its snapshot read fails. Had the
+    // entry been evicted for capacity, B would see "no current entry",
+    // read that as a store verdict, and quarantine the fleet.
+    const gateB = gateSelect(2);
+    const requestB = chat("default");
+    await gateB.reached;
+    gateB.fail();
+    const responseB = await requestB;
+    expect(responseB.status).toBe(200);
+    expect(responseB.headers.get("x-haru-routing")).toBe("stale");
+
+    // A's load succeeded, so it must still publish.
+    gateA.proceed();
+    expect((await requestA).status).toBe(200);
+
+    // The proof: the fleet still fails open. With the entry evicted
+    // under A, B's quarantine would have fenced A's successful result
+    // and this would be 503.
+    breakIt();
+    const stale = await chat("default");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+  });
+
   it("a capacity eviction does not suppress a snapshot load already in flight", async () => {
     await seedFleet("second");
     // TTL 0 forces every request to reload rather than take a cache hit,

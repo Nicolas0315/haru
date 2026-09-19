@@ -161,13 +161,19 @@ export function createApp(dependencies: AppDependencies) {
   const chatHeaderTimeoutMs =
     config.chatHeaderTimeoutMs ?? DEFAULT_CHAT_HEADER_TIMEOUT_MS;
   const snapshotCacheTtlMs = config.snapshotCacheTtlMs ?? 2000;
-  // Clamped to at least 1: a cap of 0 would evict every entry the
-  // instant it is published, which is not "a smaller cache" but a
-  // silently disabled fail-open path.
-  const snapshotCacheMaxEntries = Math.max(
-    1,
-    config.snapshotCacheMaxEntries ?? DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES,
-  );
+  const configuredCacheMaxEntries = config.snapshotCacheMaxEntries;
+  // Both guards exist because the failure modes are mirror images and
+  // both are silent. A NON-FINITE cap is not a bigger cache, it is no
+  // bound at all: `size > NaN` and `size > Infinity` are each false,
+  // so nothing would ever be evicted and the hard bound this file
+  // advertises would not exist. A cap of ZERO is the opposite: every
+  // entry evicted the instant it is published, which disables the
+  // fail-open path rather than shrinking the cache.
+  const snapshotCacheMaxEntries =
+    configuredCacheMaxEntries !== undefined &&
+    Number.isFinite(configuredCacheMaxEntries)
+      ? Math.max(1, configuredCacheMaxEntries)
+      : DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES;
   const chatMaxBodyBytes =
     config.chatMaxBodyBytes ?? DEFAULT_CHAT_MAX_BODY_BYTES;
 
@@ -216,6 +222,15 @@ export function createApp(dependencies: AppDependencies) {
   // built from the stale read's own data; only the map keeps the later
   // knowledge. Same lifetime/growth class as the maps above.
   const referenceVerdictGenerations = new Map<string, number>();
+  // Fleet id -> number of snapshot loads currently reading for it.
+  // Capacity eviction skips these, because an entry removed while a
+  // load is reading it stops being distinguishable from one that was
+  // never cached: `snapshotLoadFailed` reads "no current entry" as a
+  // store verdict and quarantines the fleet, which would fence the
+  // very in-flight load capacity eviction promises not to disturb.
+  // Bounded by concurrent requests rather than by history: the key is
+  // deleted when its last reader finishes.
+  const loadsInFlight = new Map<string, number>();
 
   const reconcilerDependencies = {
     database,
@@ -360,10 +375,13 @@ export function createApp(dependencies: AppDependencies) {
 
     const generationBeforeLoad = forgottenGenerations.get(pointer.id) ?? 0;
     let snapshot;
+    beginSnapshotLoad(pointer.id);
     try {
       snapshot = await getFleetSnapshot(database, pointer.id);
     } catch (error) {
       return snapshotLoadFailed(rawReference, pointer, error);
+    } finally {
+      endSnapshotLoad(pointer.id);
     }
     if (snapshot?.id !== pointer.id) {
       // The fleet vanished between the two reads. A slug-fallback hit on
@@ -567,13 +585,40 @@ export function createApp(dependencies: AppDependencies) {
     snapshotCache.delete(fleetId);
     snapshotCache.set(fleetId, entry);
     while (snapshotCache.size > snapshotCacheMaxEntries) {
-      const [leastRecentlyUsed] = snapshotCache.keys();
-      // size > cap >= 1 means the map is non-empty, so this always
-      // binds; the guard narrows the type rather than covering a case.
-      if (leastRecentlyUsed === undefined) {
+      const victim = leastRecentlyUsedEvictable();
+      if (victim === undefined) {
+        // Every remaining entry is being read right now. Staying over
+        // the cap until those readers finish is the cheaper mistake:
+        // the overshoot is bounded by in-flight concurrency, while
+        // evicting one of them can turn a concurrent reload failure
+        // into a quarantine that discards a load which succeeded.
         break;
       }
-      evictForCapacity(leastRecentlyUsed);
+      evictForCapacity(victim);
+    }
+  }
+
+  /** The oldest entry with no snapshot load reading it, or undefined
+   * when every entry has one. */
+  function leastRecentlyUsedEvictable(): string | undefined {
+    for (const fleetId of snapshotCache.keys()) {
+      if (!loadsInFlight.has(fleetId)) {
+        return fleetId;
+      }
+    }
+    return undefined;
+  }
+
+  function beginSnapshotLoad(fleetId: string): void {
+    loadsInFlight.set(fleetId, (loadsInFlight.get(fleetId) ?? 0) + 1);
+  }
+
+  function endSnapshotLoad(fleetId: string): void {
+    const remaining = (loadsInFlight.get(fleetId) ?? 0) - 1;
+    if (remaining > 0) {
+      loadsInFlight.set(fleetId, remaining);
+    } else {
+      loadsInFlight.delete(fleetId);
     }
   }
 
@@ -590,7 +635,11 @@ export function createApp(dependencies: AppDependencies) {
    * capacity, never by a lookup that THREW.
    *
    * The companion indexes are pruned with the entry so they stay the
-   * same order as the cache rather than outliving it. */
+   * same order as the cache rather than outliving it. That pruning is
+   * about bounded growth, not behaviour: `cachedFor` needs BOTH the
+   * alias and a live entry, so a retained alias alone would answer the
+   * same way. It is therefore not separately observable, and no test
+   * distinguishes it from a plain `snapshotCache.delete`. */
   function evictForCapacity(fleetId: string): void {
     snapshotCache.delete(fleetId);
     staleFleetIds.delete(fleetId);
