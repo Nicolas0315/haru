@@ -1633,7 +1633,7 @@ describe("chat snapshot cache size cap", () => {
     expect((await requestA).status).toBe(200);
   });
 
-  it("publishes a resumed reload and trims the other fleet when it completes", async () => {
+  it("allows a publish over the cap while a reload is pinned, and trims once it lands", async () => {
     await seedFleet("second");
     // TTL 0 forces every request to reload rather than take a cache hit.
     const { chat, breakIt, gateSelect } = cappedApp({
@@ -1648,18 +1648,24 @@ describe("chat snapshot cache size cap", () => {
     const requestA = chat("default");
     await gate.reached;
 
-    // The other fleet publishes and pushes the cache over the cap, but
-    // nothing can be evicted yet: "default" is pinned by A's read and
-    // "second" is exempt as the entry just published.
+    // The other fleet publishes and pushes the cache over the cap, and
+    // nothing can be evicted: "default" is pinned by A's read and
+    // "second" is exempt as the entry just published. Going over the
+    // cap is the allowed outcome here rather than dropping either.
     expect((await chat("second")).status).toBe(200);
 
-    // A's load completes. Finishing the read is what releases the pin
-    // and runs the trim, and "second" is then the only candidate.
+    // A's load completes and its result is published, which is the
+    // trim this case can actually observe: "second" is the only
+    // candidate by then. The completion trim in endSnapshotLoad runs
+    // first and would take the same entry, so this case cannot tell
+    // the two apart. The neighbouring "trims back to the cap when the
+    // last reader finishes" case is the one that isolates it, because
+    // there the reload FAILS and nothing publishes afterwards.
     gate.proceed();
     expect((await requestA).status).toBe(200);
 
     // A's result was published, so "default" fails open; "second" is
-    // the entry the trim took.
+    // the entry that went.
     breakIt();
     const stale = await chat("default");
     expect(stale.status).toBe(200);
