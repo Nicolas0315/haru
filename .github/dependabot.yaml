@@ -5,6 +5,12 @@ version: 2
 # window lets a compromised or yanked release be pulled before we adopt
 # it. Security (CVE) updates are exempt from cooldown by default, so
 # fixes still land immediately.
+#
+# `groups` exist here for one reason: a family whose members must move
+# in lockstep is red as separate PRs no matter which half lands first,
+# so splitting it produces failing PRs rather than reviewable ones.
+# Grouping is not for convenience; add a family only with the evidence
+# for its coupling written next to it.
 updates:
   # pnpm workspace. Every npm dep in this repo is declared as a
   # `catalog:` reference and resolved through the catalog in
@@ -17,6 +23,23 @@ updates:
       interval: daily
     cooldown:
       default-days: 1
+    # The default cap is 5, and exactly five npm PRs have been open
+    # since 2026-07-13 with none opened after, so catalog updates are
+    # not queued behind the cap, they stop being proposed at all.
+    # Raising it is only safe alongside the groups below, which keep a
+    # lockstep family from arriving as two separately-red PRs.
+    open-pull-requests-limit: 20
+    groups:
+      # `@vitest/coverage-v8` pins its runner peer to the EXACT vitest
+      # version (4.1.10 declares `"vitest": "4.1.10"`, not a range), so
+      # a split bump is unsatisfiable by construction: whichever half
+      # lands first leaves the pair mismatched until the other follows.
+      # `@vitest/eslint-plugin` is deliberately NOT in this group: it
+      # versions independently and peers on `vitest: "*"`.
+      vitest:
+        patterns:
+          - vitest
+          - "@vitest/coverage-v8"
     ignore:
       - dependency-name: "@types/node"
         update-types:
@@ -30,3 +53,15 @@ updates:
       interval: daily
     cooldown:
       default-days: 1
+    groups:
+      # `github/codeql-action/init` and `github/codeql-action/analyze`
+      # are two entry points of ONE action repository, and the runner
+      # refuses a mismatched pair: split across PRs, both Analyze jobs
+      # fail with "Loaded a configuration file for version '<new>', but
+      # running version '<old>'". Not hypothetical: every bump from
+      # 4.37.1 to 4.38.0 (ten of them, 2026-07-17 to 2026-09-10) was
+      # red for exactly this reason and none could merge, which is why
+      # the workflows are still pinned to 4.37.0.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
