@@ -1594,6 +1594,45 @@ describe("chat snapshot cache size cap", () => {
     expect((await chat("second")).status).toBe(503);
   });
 
+  it("does not evict the stale entry a finishing load just served", async () => {
+    await seedFleet("second");
+    const { chat, breakIt, gateSelect } = cappedApp({
+      snapshotCacheMaxEntries: 1,
+      snapshotCacheTtlMs: 0,
+    });
+    expect((await chat("default")).status).toBe(200);
+
+    // "default" is pinned by a frozen reload, so it is never a victim.
+    const gateA = gateSelect(2);
+    const requestA = chat("default");
+    await gateA.reached;
+
+    // "second" publishes over the cap and stays, exempt as the entry
+    // just published.
+    expect((await chat("second")).status).toBe(200);
+
+    // A reload of "second" fails, so its cached entry is served stale
+    // and becomes the most recently used. The trim that runs when that
+    // read finishes must not then evict it: the only older entry is
+    // the pinned one, and dropping the newest to keep the oldest is
+    // backwards.
+    const gateB = gateSelect(2);
+    const requestB = chat("second");
+    await gateB.reached;
+    gateB.fail();
+    const responseB = await requestB;
+    expect(responseB.status).toBe(200);
+    expect(responseB.headers.get("x-haru-routing")).toBe("stale");
+
+    breakIt();
+    const stale = await chat("second");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+
+    gateA.fail();
+    expect((await requestA).status).toBe(200);
+  });
+
   it("a capacity eviction does not suppress a snapshot load already in flight", async () => {
     await seedFleet("second");
     // TTL 0 forces every request to reload rather than take a cache hit,

@@ -594,10 +594,16 @@ export function createApp(dependencies: AppDependencies) {
    * finishing is the other event that can make an entry evictable, and
    * without it an overshoot would persist until the next publish
    * happened to come along (a publish that may never come, or may lose
-   * its race and never reach here). */
-  function evictOverflow(justPublishedFleetId?: string): void {
+   * its race and never reach here).
+   *
+   * `exemptFleetId` is the fleet this particular call must not evict,
+   * because it is the one the caller just did work for: the entry a
+   * publish just fetched, or the entry a finishing load just served
+   * stale. Evicting it would throw away the newest thing the cache
+   * knows in order to keep something older. */
+  function evictOverflow(exemptFleetId?: string): void {
     while (snapshotCache.size > snapshotCacheMaxEntries) {
-      const victim = leastRecentlyUsedEvictable(justPublishedFleetId);
+      const victim = leastRecentlyUsedEvictable(exemptFleetId);
       if (victim === undefined) {
         // Nothing may be evicted yet: every remaining entry is being
         // read, or the only candidate is the entry just published.
@@ -611,12 +617,12 @@ export function createApp(dependencies: AppDependencies) {
   }
 
   /** The oldest entry that is neither being read by a snapshot load
-   * nor the one just published, or undefined when there is none. */
+   * nor exempt for this call, or undefined when there is none. */
   function leastRecentlyUsedEvictable(
-    justPublishedFleetId?: string,
+    exemptFleetId?: string,
   ): string | undefined {
     for (const fleetId of snapshotCache.keys()) {
-      if (!loadsInFlight.has(fleetId) && fleetId !== justPublishedFleetId) {
+      if (!loadsInFlight.has(fleetId) && fleetId !== exemptFleetId) {
         return fleetId;
       }
     }
@@ -638,7 +644,15 @@ export function createApp(dependencies: AppDependencies) {
     // publish was waiting for. Trimming here is what makes "over the
     // cap only while readers are reading" true rather than "until some
     // later publish happens to trim it".
-    evictOverflow();
+    //
+    // It is exempt from ITS OWN trim, for the same reason a publish
+    // exempts what it just published. On the failure path this entry
+    // was just served stale and touched to most-recently-used, so
+    // evicting it would drop the newest entry and keep an older one
+    // that happens to still have a reader. On the success path the
+    // publish is the next statement, and evicting here would discard
+    // alias index entries that the publish does not fully restore.
+    evictOverflow(fleetId);
   }
 
   /** Drop the least recently used fleet because the cache is full.
