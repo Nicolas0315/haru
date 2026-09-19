@@ -51,6 +51,16 @@ export interface AppConfig {
   /** Fleet snapshot cache TTL for the chat hot path. */
   snapshotCacheTtlMs?: number;
   /**
+   * Max fleets held in the chat hot path's snapshot cache, least
+   * recently used evicted first. Deliberately NOT read from the
+   * environment: a cap is a policy knob, and CONTRIBUTING asks for an
+   * issue before one is added. The default is generous for the
+   * documented scale (fleets are few and long-lived), so this exists
+   * to make the eviction testable rather than to be tuned in
+   * production.
+   */
+  snapshotCacheMaxEntries?: number;
+  /**
    * Max chat request body size in bytes (413 above it). The proxy must
    * buffer the whole body to extract `model` and forward it
    * byte-identically, so this caps per-request memory instead of
@@ -104,6 +114,21 @@ const STALE_ROUTING_HEADER = "x-haru-routing";
  */
 const CONTROL_MAX_BODY_BYTES = 16 * 1024;
 
+/**
+ * Size cap for the chat hot path's snapshot cache. Without one, a
+ * fleet that simply stops being queried pins its last FleetSnapshot
+ * for process lifetime: entries are dropped when the store REPORTS the
+ * fleet gone and quarantined when one is learned unusable, but neither
+ * is reached by a fleet nobody asks about any more.
+ *
+ * 256 is chosen to be far above the documented scale (fleets are few
+ * and long-lived) precisely because evicting is not free: an evicted
+ * entry is one the fail-open path can no longer serve during an
+ * outage, so the cap must only ever bite on a population the design
+ * does not anticipate.
+ */
+const DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES = 256;
+
 /** Shared 413 gate for the control POSTs, mirroring the chat path. */
 const controlBodyLimit = bodyLimit({
   maxSize: CONTROL_MAX_BODY_BYTES,
@@ -136,6 +161,13 @@ export function createApp(dependencies: AppDependencies) {
   const chatHeaderTimeoutMs =
     config.chatHeaderTimeoutMs ?? DEFAULT_CHAT_HEADER_TIMEOUT_MS;
   const snapshotCacheTtlMs = config.snapshotCacheTtlMs ?? 2000;
+  // Clamped to at least 1: a cap of 0 would evict every entry the
+  // instant it is published, which is not "a smaller cache" but a
+  // silently disabled fail-open path.
+  const snapshotCacheMaxEntries = Math.max(
+    1,
+    config.snapshotCacheMaxEntries ?? DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES,
+  );
   const chatMaxBodyBytes =
     config.chatMaxBodyBytes ?? DEFAULT_CHAT_MAX_BODY_BYTES;
 
@@ -145,6 +177,13 @@ export function createApp(dependencies: AppDependencies) {
   // revision (one narrow SELECT), so an active-pointer move surfaces
   // immediately no matter which process moved it; the TTL only bounds
   // non-routing staleness (slot states).
+  //
+  // Capped at snapshotCacheMaxEntries, least recently used first.
+  // Map iteration order IS the recency order: every read that SERVES
+  // an entry re-inserts it (touchSnapshotEntry), so the oldest key is
+  // the least recently used one. "Used" deliberately includes the
+  // fail-open reads, or an outage would evict exactly the entries
+  // keeping traffic alive.
   const snapshotCache = new Map<string, SnapshotCacheEntry>();
   // Reference (slug or uuid) -> fleet id, learned from every successful
   // lookup. The cache above is keyed by fleet id, which is the RESULT of
@@ -314,6 +353,7 @@ export function createApp(dependencies: AppDependencies) {
       hit?.routeRevision === pointer.routeRevision &&
       hit.expiresAtMs > nowMs
     ) {
+      touchSnapshotEntry(pointer.id);
       markFresh(pointer.id);
       return { ok: true, snapshot: hit.snapshot, isStale: false };
     }
@@ -346,7 +386,7 @@ export function createApp(dependencies: AppDependencies) {
       (existing !== undefined &&
         existing.routeRevision > snapshot.routeRevision);
     if (!didLoseRace) {
-      snapshotCache.set(pointer.id, {
+      publishSnapshotEntry(pointer.id, {
         snapshot,
         routeRevision: snapshot.routeRevision,
         expiresAtMs: nowMs + snapshotCacheTtlMs,
@@ -389,6 +429,7 @@ export function createApp(dependencies: AppDependencies) {
       // ROUTING is provably current: only the refresh of non-routing
       // state (slot states) failed. Serving it is the same trade the TTL
       // already makes.
+      touchSnapshotEntry(pointer.id);
       return markStale(reference, pointer.id, current, detail);
     }
     if (
@@ -430,6 +471,11 @@ export function createApp(dependencies: AppDependencies) {
       );
       return { ok: false, reason: "unavailable", detail };
     }
+    // Serving from the cache counts as use: during an outage these are
+    // the only entries doing any work, and evicting them for a fleet
+    // that happens to be queried later would end the fail-open the
+    // cache exists to provide.
+    touchSnapshotEntry(cached.fleetId);
     return markStale(reference, cached.fleetId, cached.entry, detail);
   }
 
@@ -490,6 +536,62 @@ export function createApp(dependencies: AppDependencies) {
       fleetId,
       (forgottenGenerations.get(fleetId) ?? 0) + 1,
     );
+    snapshotCache.delete(fleetId);
+    staleFleetIds.delete(fleetId);
+    for (const [reference, id] of fleetIdByReference) {
+      if (id === fleetId) {
+        fleetIdByReference.delete(reference);
+      }
+    }
+  }
+
+  /** Move an entry to the most-recently-used end. `Map` preserves
+   * insertion order and `set` on an EXISTING key does not reorder, so
+   * the re-insert has to be explicit. Pure bookkeeping: it never
+   * changes what is cached, only what would be evicted first. */
+  function touchSnapshotEntry(fleetId: string): void {
+    const entry = snapshotCache.get(fleetId);
+    if (entry === undefined) {
+      return;
+    }
+    snapshotCache.delete(fleetId);
+    snapshotCache.set(fleetId, entry);
+  }
+
+  /** Publish an entry as the most recently used one, then evict down
+   * to the cap. */
+  function publishSnapshotEntry(
+    fleetId: string,
+    entry: SnapshotCacheEntry,
+  ): void {
+    snapshotCache.delete(fleetId);
+    snapshotCache.set(fleetId, entry);
+    while (snapshotCache.size > snapshotCacheMaxEntries) {
+      const [leastRecentlyUsed] = snapshotCache.keys();
+      // size > cap >= 1 means the map is non-empty, so this always
+      // binds; the guard narrows the type rather than covering a case.
+      if (leastRecentlyUsed === undefined) {
+        break;
+      }
+      evictForCapacity(leastRecentlyUsed);
+    }
+  }
+
+  /** Drop the least recently used fleet because the cache is full.
+   *
+   * Deliberately NOT forgetFleet. That bumps the fleet's forgotten
+   * generation, which is a store VERDICT ("gone", "unusable") and
+   * suppresses an in-flight snapshot load that predates it. Capacity
+   * is not a verdict: nothing has been learned about this fleet, so a
+   * load already in flight must still be allowed to publish, and the
+   * next request re-populates the entry from a store that, in this
+   * path, is by definition answering. The eviction rule stays what
+   * KNOWN_ISSUES required of it: driven by what the store SAYS, or by
+   * capacity, never by a lookup that THREW.
+   *
+   * The companion indexes are pruned with the entry so they stay the
+   * same order as the cache rather than outliving it. */
+  function evictForCapacity(fleetId: string): void {
     snapshotCache.delete(fleetId);
     staleFleetIds.delete(fleetId);
     for (const [reference, id] of fleetIdByReference) {

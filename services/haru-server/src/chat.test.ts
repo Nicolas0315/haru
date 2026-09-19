@@ -1370,3 +1370,136 @@ describe("POST /v1/chat/completions with an unreachable state store", () => {
     expect(wasUpstreamAborted).toBe(true);
   });
 });
+
+describe("chat snapshot cache size cap", () => {
+  /** Seed an additional fleet that differs from the default one only by
+   * slug. The cap is about how many fleets the cache holds, not about
+   * where they route, so the domains are deliberately identical. */
+  async function seedFleet(slug: string): Promise<void> {
+    const layout = testLayout() as { slug: string };
+    layout.slug = slug;
+    await applyFleetLayout(database, layout);
+  }
+
+  function cappedApp(options: {
+    snapshotCacheMaxEntries: number;
+    snapshotCacheTtlMs?: number;
+  }) {
+    const broken = breakableDatabase(database);
+    const app = chatApp({
+      database: broken.database,
+      config: {
+        snapshotCacheMaxEntries: options.snapshotCacheMaxEntries,
+        ...(options.snapshotCacheTtlMs !== undefined && {
+          snapshotCacheTtlMs: options.snapshotCacheTtlMs,
+        }),
+      },
+    });
+    const chat = (fleetReference: string) =>
+      app.request("/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-haru-fleet": fleetReference,
+        },
+        body: chatBody,
+      });
+    return { chat, ...broken };
+  }
+
+  it("evicts the least recently used fleet once the cap is reached", async () => {
+    await seedFleet("second");
+    const { chat, breakIt } = cappedApp({ snapshotCacheMaxEntries: 1 });
+
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("second")).status).toBe(200);
+
+    // Only the newer fleet is still cached, so only it survives an
+    // outage. Without a cap BOTH would be pinned for process lifetime.
+    breakIt();
+    const survivor = await chat("second");
+    expect(survivor.status).toBe(200);
+    expect(survivor.headers.get("x-haru-routing")).toBe("stale");
+    expect((await chat("default")).status).toBe(503);
+  });
+
+  it("evicts by recency, not by insertion order", async () => {
+    await seedFleet("second");
+    await seedFleet("third");
+    const { chat, breakIt } = cappedApp({ snapshotCacheMaxEntries: 2 });
+
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("second")).status).toBe(200);
+    // A cache HIT on the oldest entry makes it the newest. A plain
+    // insertion-ordered Map would not reorder here, and "default" would
+    // be the one evicted below.
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("third")).status).toBe(200);
+
+    breakIt();
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("third")).status).toBe(200);
+    expect((await chat("second")).status).toBe(503);
+  });
+
+  it("counts a fail-open read as use, so an outage does not evict what is serving it", async () => {
+    await seedFleet("second");
+    await seedFleet("third");
+    const { chat, breakIt, heal } = cappedApp({ snapshotCacheMaxEntries: 2 });
+
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("second")).status).toBe(200);
+
+    // During the outage only "default" is doing any work.
+    breakIt();
+    const stale = await chat("default");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+
+    // The store comes back and a third fleet arrives. The entry that
+    // carried the outage must not be the one evicted for it.
+    heal();
+    expect((await chat("third")).status).toBe(200);
+
+    breakIt();
+    expect((await chat("default")).status).toBe(200);
+    expect((await chat("second")).status).toBe(503);
+  });
+
+  it("a capacity eviction does not suppress a snapshot load already in flight", async () => {
+    await seedFleet("second");
+    // TTL 0 forces every request to reload rather than take a cache hit,
+    // which is what puts a load in flight to race the eviction.
+    const { chat, breakIt, gateSelect } = cappedApp({
+      snapshotCacheMaxEntries: 1,
+      snapshotCacheTtlMs: 0,
+    });
+    expect((await chat("default")).status).toBe(200);
+
+    // Request A freezes inside its snapshot load (access 1 = pointer
+    // read, access 2 = fleet row).
+    const gate = gateSelect(2);
+    const requestA = chat("default");
+    await gate.reached;
+
+    // A full request for the other fleet publishes its entry, which
+    // pushes the cache over the cap and evicts "default" for CAPACITY.
+    expect((await chat("second")).status).toBe(200);
+
+    // A's load now completes. A capacity eviction is not a store
+    // verdict, so unlike forgetFleet it must not have quarantined the
+    // fleet's generation: A is still entitled to publish what it read.
+    gate.proceed();
+    expect((await requestA).status).toBe(200);
+
+    // The proof: "default" fail-opens again. Had the eviction bumped the
+    // forgotten generation, A's publish would have been suppressed as a
+    // lost race and this would be 503. (Publishing it re-crossed the cap
+    // in turn, so "second" is now the evicted one.)
+    breakIt();
+    const stale = await chat("default");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+    expect((await chat("second")).status).toBe(503);
+  });
+});
