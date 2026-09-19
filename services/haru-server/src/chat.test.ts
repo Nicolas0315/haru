@@ -1528,6 +1528,72 @@ describe("chat snapshot cache size cap", () => {
     expect(stale.headers.get("x-haru-routing")).toBe("stale");
   });
 
+  it("never evicts the entry just published to make room for itself", async () => {
+    await seedFleet("second");
+    const { chat, breakIt, heal, gateSelect } = cappedApp({
+      snapshotCacheMaxEntries: 1,
+      snapshotCacheTtlMs: 0,
+    });
+    expect((await chat("default")).status).toBe(200);
+
+    // "default" becomes unevictable mid-reload, so it is not a
+    // candidate when the next publish crosses the cap.
+    const gateA = gateSelect(2);
+    const requestA = chat("default");
+    await gateA.reached;
+
+    // The only other candidate is "second" itself. Evicting it would
+    // discard the snapshot the publish just fetched, so the cache goes
+    // over the cap instead and "second" stays cached.
+    expect((await chat("second")).status).toBe(200);
+    breakIt();
+    const stale = await chat("second");
+    expect(stale.status).toBe(200);
+    expect(stale.headers.get("x-haru-routing")).toBe("stale");
+
+    heal();
+    gateA.proceed();
+    expect((await requestA).status).toBe(200);
+  });
+
+  it("trims back to the cap when the last reader finishes, not at the next publish", async () => {
+    await seedFleet("second");
+    const { chat, breakIt, gateSelect } = cappedApp({
+      snapshotCacheMaxEntries: 1,
+      snapshotCacheTtlMs: 0,
+    });
+    expect((await chat("default")).status).toBe(200);
+
+    // A freezes mid-reload, so "default" is unevictable.
+    const gateA = gateSelect(2);
+    const requestA = chat("default");
+    await gateA.reached;
+
+    // Publishing "second" crosses the cap with no legal victim: the
+    // only other entry is being read, and evicting the entry just
+    // published would undo the publish. The cache sits at 2.
+    expect((await chat("second")).status).toBe(200);
+
+    // A FAILS, so it never publishes. Nothing else will publish
+    // either, which is the case where waiting for "the next publish"
+    // to trim would wait forever.
+    gateA.fail();
+    const responseA = await requestA;
+    expect(responseA.status).toBe(200);
+    expect(responseA.headers.get("x-haru-routing")).toBe("stale");
+
+    // Finishing that read is what returns the cache to the cap. Which
+    // entry goes is plain LRU: serving A from "default" counted as
+    // use, so "second" is now the oldest and is the one evicted.
+    // Without the trim on load completion both would still be cached
+    // here, since nothing publishes again.
+    breakIt();
+    const survivor = await chat("default");
+    expect(survivor.status).toBe(200);
+    expect(survivor.headers.get("x-haru-routing")).toBe("stale");
+    expect((await chat("second")).status).toBe(503);
+  });
+
   it("a capacity eviction does not suppress a snapshot load already in flight", async () => {
     await seedFleet("second");
     // TTL 0 forces every request to reload rather than take a cache hit,

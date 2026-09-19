@@ -584,25 +584,39 @@ export function createApp(dependencies: AppDependencies) {
   ): void {
     snapshotCache.delete(fleetId);
     snapshotCache.set(fleetId, entry);
+    // `fleetId` is exempt: it is the newest entry, so evicting it to
+    // make room would undo the publish that asked for the room.
+    evictOverflow(fleetId);
+  }
+
+  /** Bring the cache back to the cap, skipping entries that cannot be
+   * evicted. Called after a publish AND after a load finishes: a load
+   * finishing is the other event that can make an entry evictable, and
+   * without it an overshoot would persist until the next publish
+   * happened to come along (a publish that may never come, or may lose
+   * its race and never reach here). */
+  function evictOverflow(justPublishedFleetId?: string): void {
     while (snapshotCache.size > snapshotCacheMaxEntries) {
-      const victim = leastRecentlyUsedEvictable();
+      const victim = leastRecentlyUsedEvictable(justPublishedFleetId);
       if (victim === undefined) {
-        // Every remaining entry is being read right now. Staying over
-        // the cap until those readers finish is the cheaper mistake:
-        // the overshoot is bounded by in-flight concurrency, while
-        // evicting one of them can turn a concurrent reload failure
-        // into a quarantine that discards a load which succeeded.
-        break;
+        // Nothing may be evicted yet: every remaining entry is being
+        // read, or the only candidate is the entry just published.
+        // Staying over the cap is the cheaper mistake here, and it is
+        // temporary: the overshoot is bounded by in-flight
+        // concurrency, and the last reader to finish trims it.
+        return;
       }
       evictForCapacity(victim);
     }
   }
 
-  /** The oldest entry with no snapshot load reading it, or undefined
-   * when every entry has one. */
-  function leastRecentlyUsedEvictable(): string | undefined {
+  /** The oldest entry that is neither being read by a snapshot load
+   * nor the one just published, or undefined when there is none. */
+  function leastRecentlyUsedEvictable(
+    justPublishedFleetId?: string,
+  ): string | undefined {
     for (const fleetId of snapshotCache.keys()) {
-      if (!loadsInFlight.has(fleetId)) {
+      if (!loadsInFlight.has(fleetId) && fleetId !== justPublishedFleetId) {
         return fleetId;
       }
     }
@@ -617,9 +631,14 @@ export function createApp(dependencies: AppDependencies) {
     const remaining = (loadsInFlight.get(fleetId) ?? 0) - 1;
     if (remaining > 0) {
       loadsInFlight.set(fleetId, remaining);
-    } else {
-      loadsInFlight.delete(fleetId);
+      return;
     }
+    loadsInFlight.delete(fleetId);
+    // This fleet just became evictable, which may be what an earlier
+    // publish was waiting for. Trimming here is what makes "over the
+    // cap only while readers are reading" true rather than "until some
+    // later publish happens to trim it".
+    evictOverflow();
   }
 
   /** Drop the least recently used fleet because the cache is full.
