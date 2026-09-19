@@ -11,6 +11,15 @@ version: 2
 # so splitting it produces failing PRs rather than reviewable ones.
 # Grouping is not for convenience; add a family only with the evidence
 # for its coupling written next to it.
+#
+# Each family needs TWO group entries, because `applies-to` is per
+# group and defaults to `version-updates`: a group written once covers
+# version updates only, and a CVE against one member would still open
+# its own ungrouped PR. Note the residual limit this does NOT fix: a
+# grouped security PR carries only the members that actually have a
+# fix available, so an advisory against one half alone still produces
+# a one-sided bump. The security group removes the "two separate
+# security PRs" case, not the "only one side is vulnerable" case.
 updates:
   # pnpm workspace. Every npm dep in this repo is declared as a
   # `catalog:` reference and resolved through the catalog in
@@ -40,6 +49,15 @@ updates:
         patterns:
           - vitest
           - "@vitest/coverage-v8"
+      # Same family, security lane. Security updates are exempt from
+      # the cooldown above, so these arrive immediately; grouping them
+      # keeps a simultaneous advisory against both halves in one PR
+      # instead of two mismatched ones.
+      vitest-security:
+        applies-to: security-updates
+        patterns:
+          - vitest
+          - "@vitest/coverage-v8"
     ignore:
       - dependency-name: "@types/node"
         update-types:
@@ -63,5 +81,14 @@ updates:
       # red for exactly this reason and none could merge, which is why
       # the workflows are still pinned to 4.37.0.
       codeql-action:
+        patterns:
+          - "github/codeql-action*"
+      # Same family, security lane (see the `applies-to` note at the
+      # top of this file). An advisory against the action repository
+      # reaches `init` and `analyze` as two separate dependencies, so
+      # ungrouped it would recreate the version mismatch above at the
+      # worst possible moment.
+      codeql-action-security:
+        applies-to: security-updates
         patterns:
           - "github/codeql-action*"
