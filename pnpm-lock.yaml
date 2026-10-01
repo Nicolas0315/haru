@@ -67,8 +67,8 @@ catalogs:
       specifier: ^17.7.0
       version: 17.7.0
     hono:
-      specifier: ^4.13.5
-      version: 4.13.5
+      specifier: ^4.13.7
+      version: 4.13.12
     jiti:
       specifier: ^2.7.0
       version: 2.7.0
@@ -334,10 +334,10 @@ importers:
         version: link:../../packages/protocol
       '@hono/node-server':
         specifier: 'catalog:'
-        version: 2.1.1(hono@4.13.5)
+        version: 2.1.1(hono@4.13.12)
       hono:
         specifier: 'catalog:'
-        version: 4.13.5
+        version: 4.13.12
       undici:
         specifier: 'catalog:'
         version: 8.11.2
@@ -368,10 +368,10 @@ importers:
         version: link:../../packages/protocol
       '@hono/node-server':
         specifier: 'catalog:'
-        version: 2.1.1(hono@4.13.5)
+        version: 2.1.1(hono@4.13.12)
       hono:
         specifier: 'catalog:'
-        version: 4.13.5
+        version: 4.13.12
       zod:
         specifier: 'catalog:'
         version: 4.4.3
@@ -2193,8 +2193,8 @@ packages:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
     engines: {node: '>=8'}
 
-  hono@4.13.5:
-    resolution: {integrity: sha512-O6+/eCYRkzzzy0rPWwKLiGBR1nFuUPZynnwjxN1MBA62NNqbT0wQEzQyK2gSO5yDIDB336sXQleAhOHrzlYyKw==}
+  hono@4.13.12:
+    resolution: {integrity: sha512-6E2QDAc9Ick9Sq77ZrGS/dk2WUYni91aufTw6LJKpV7w8kW5/GxVUc650FOADOmlwg3K+f7Pun6XlV+pYmW6gw==}
     engines: {node: '>=16.9.0'}
 
   html-escaper@2.0.2:
@@ -3156,9 +3156,9 @@ snapshots:
       '@eslint/core': 1.2.1
       levn: 0.4.1
 
-  '@hono/node-server@2.1.1(hono@4.13.5)':
+  '@hono/node-server@2.1.1(hono@4.13.12)':
     dependencies:
-      hono: 4.13.5
+      hono: 4.13.12
 
   '@humanfs/core@0.19.2':
     dependencies:
@@ -4137,7 +4137,7 @@ snapshots:
 
   has-flag@4.0.0: {}
 
-  hono@4.13.5: {}
+  hono@4.13.12: {}
 
   html-escaper@2.0.2: {}
 
