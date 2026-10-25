@@ -1,5 +1,6 @@
 import {
   isBearerTokenValid,
+  isLocalBrowserOriginAllowed,
   errorBody,
   probeRequestSchema,
   readOptionalJsonBody,
@@ -100,6 +101,18 @@ export function createSupervisorApp(dependencies: SupervisorDependencies) {
   app.get("/healthz", (c) => c.json({ ok: true }));
 
   app.use("/v1/*", async (c, next) => {
+    if (
+      !token &&
+      !isLocalBrowserOriginAllowed(c.req.header("origin"), c.req.url)
+    ) {
+      return c.json(
+        errorBody(
+          "unauthorized",
+          "cross-origin requests require a bearer token",
+        ),
+        403,
+      );
+    }
     if (!isBearerTokenValid(c.req.header("authorization"), token)) {
       return c.json(
         errorBody("unauthorized", "invalid or missing bearer token"),

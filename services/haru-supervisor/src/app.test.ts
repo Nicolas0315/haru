@@ -94,6 +94,42 @@ function freshState(): FakeVllmState {
 }
 
 describe("auth", () => {
+  it("rejects cross-origin bodyless mutations in tokenless mode before contacting vLLM", async () => {
+    const state = freshState();
+    const app = makeApp({ state });
+    for (const origin of ["http://localhost:9999", "null"]) {
+      const response = await app.request(
+        "http://127.0.0.1:8701/v1/vllm/sleep",
+        {
+          method: "POST",
+          headers: { origin },
+        },
+      );
+      expect(response.status).toBe(403);
+    }
+    expect(state.calls).toEqual([]);
+    expect(
+      (await app.request("https://rebound.example:8701/v1/status")).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.request("https://rebound.example:8701/v1/vllm/sleep", {
+          method: "POST",
+          headers: { origin: "https://rebound.example:8701" },
+        })
+      ).status,
+    ).toBe(403);
+    expect(state.calls).toEqual([]);
+    expect(
+      (
+        await app.request("http://127.0.0.1:8701/v1/vllm/sleep", {
+          method: "POST",
+          headers: { origin: "http://127.0.0.1:8701" },
+        })
+      ).status,
+    ).toBe(200);
+  });
+
   it("guards every /v1 route when a token is set; healthz stays open", async () => {
     const app = makeApp({ state: freshState(), token: "secret" });
     expect((await app.request("/healthz")).status).toBe(200);

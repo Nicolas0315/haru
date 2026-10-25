@@ -343,3 +343,8 @@ intended fixes in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
   skyserve` domains through launch/teardown steps is the next slice.
 - **More than two domains per fleet**, weighted/canary routing, and
   multi-fleet scheduling.
+
+Tokenless local development rejects browser requests from other origins (including
+opaque origins) and checks loopback hostnames even when Origin is absent. Native clients without an Origin
+header remain supported. Browser clients served from another port must configure
+and explicitly send the API or supervisor bearer token.

@@ -1,4 +1,8 @@
-import { isBearerTokenValid, errorBody } from "@haru/protocol";
+import {
+  isBearerTokenValid,
+  isLocalBrowserOriginAllowed,
+  errorBody,
+} from "@haru/protocol";
 
 import type { MiddlewareHandler } from "hono";
 
@@ -12,6 +16,18 @@ export function bearerAuth(
   expectedToken: string | undefined,
 ): MiddlewareHandler {
   return async (c, next) => {
+    if (
+      !expectedToken &&
+      !isLocalBrowserOriginAllowed(c.req.header("origin"), c.req.url)
+    ) {
+      return c.json(
+        errorBody(
+          "unauthorized",
+          "cross-origin requests require a bearer token",
+        ),
+        403,
+      );
+    }
     if (!isBearerTokenValid(c.req.header("authorization"), expectedToken)) {
       return c.json(
         errorBody("unauthorized", "invalid or missing bearer token"),
