@@ -27,7 +27,7 @@ catalog:
   eslint-plugin-regexp: "^3.1.1"
   eslint-plugin-unicorn: "^71.1.0"
   globals: "^17.7.0"
-  hono: "^4.13.5"
+  hono: "^4.13.11"
   # node-postgres, used only by the optional real-Postgres test lane
   # (HARU_TEST_DATABASE_URL); production stays on the Neon HTTP driver.
   pg: "^8.22.0"
@@ -44,10 +44,10 @@ catalog:
   # Dedicated dispatcher for the chat proxy: Node's bundled fetch
   # enforces a fixed 300s headersTimeout that silently capped
   # HARU_CHAT_HEADER_TIMEOUT_MS (see haru-server/src/chat-fetch.ts).
-  undici: "^8.10.2"
+  undici: "^8.12.2"
   vitest: "^5.0.0"
   yaml: "^2.9.0"
-  zod: "^4.4.3"
+  zod: "^4.6.6"
 catalogs:
   # TypeScript 7 (the native compiler) drives `tsc` builds and
   # typechecking, but typescript-eslint's supported peer range is
