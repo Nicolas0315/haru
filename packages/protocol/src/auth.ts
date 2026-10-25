@@ -33,3 +33,21 @@ export function isBearerTokenValid(
   const presented = match?.[1] ?? "";
   return presented !== "" && isSameSecret(presented, expectedToken);
 }
+
+/** Browser-only CSRF boundary for tokenless loopback development. */
+export function isLocalBrowserOriginAllowed(
+  origin: string | undefined,
+  requestUrl: string,
+): boolean {
+  try {
+    const target = new URL(requestUrl);
+    // Enforce the Host boundary even when same-origin browser GETs omit Origin.
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(target.hostname))
+      return false;
+    // Native loopback clients do not send Origin.
+    if (origin === undefined) return true;
+    return new URL(origin).origin === target.origin;
+  } catch {
+    return false;
+  }
+}
